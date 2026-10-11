@@ -21,8 +21,10 @@ func refFamily(ns, typ string) FamilyID { return FamilyID{ns, typ, "1"} }
 
 func TestRegistryCompleteness(t *testing.T) {
 	fams := AllPhysMathFamilies()
-	if len(fams) != 16 {
-		t.Fatalf("registry has %d families, want 16", len(fams))
+	// K1 slice A1-A3 grows the registry 16 -> 20 (approved foundation
+	// extension; representation + structural validation only).
+	if len(fams) != 20 {
+		t.Fatalf("registry has %d families, want 20", len(fams))
 	}
 	seen := map[FamilyID]bool{}
 	for _, f := range fams {
@@ -155,7 +157,21 @@ func TestOperatorApplicationContract(t *testing.T) {
 	if err := op.Validate(); err != nil {
 		t.Fatalf("valid differentiate rejected: %v", err)
 	}
-	badID := OperatorApplication{OperatorID: "covariant_derivative", Args: []artifact.ArtifactRef{arg}, Parameters: params}
+	// A4 spec change (K1 slice): covariant_derivative is reserved
+	// representational vocabulary, never executable. Empty parameters
+	// validate; non-empty parameters and unknown IDs fail closed.
+	reserved := OperatorApplication{OperatorID: "covariant_derivative", Args: []artifact.ArtifactRef{arg}}
+	if err := reserved.Validate(); err != nil {
+		t.Fatalf("reserved covariant_derivative rejected: %v", err)
+	}
+	if reserved.Executable() {
+		t.Fatal("covariant_derivative reports executable")
+	}
+	withParams := OperatorApplication{OperatorID: "covariant_derivative", Args: []artifact.ArtifactRef{arg}, Parameters: params}
+	if err := withParams.Validate(); err == nil {
+		t.Fatal("covariant_derivative with slice-1 parameters accepted")
+	}
+	badID := OperatorApplication{OperatorID: "integrate", Args: []artifact.ArtifactRef{arg}}
 	if err := badID.Validate(); err == nil {
 		t.Fatal("non-vocabulary OperatorID accepted")
 	}

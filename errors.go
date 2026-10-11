@@ -16,4 +16,7 @@ var (
 	ErrBadInput = errors.New("physmath: invalid rule input")
 	// ErrMissingCondition: required explicit condition absent (§§17.4, 17.10).
 	ErrMissingCondition = errors.New("physmath: missing required condition")
+	// ErrOperatorNotExecutable: reserved operator invoked for execution
+	// (A4 covariant_derivative reservation; K1 s1/s4-class steps).
+	ErrOperatorNotExecutable = errors.New("physmath: reserved operator is not executable")
 )

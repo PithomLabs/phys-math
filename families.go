@@ -21,7 +21,9 @@ type FamilyID struct {
 	SchemaVersion string
 }
 
-// Family constants for the 16 Phase-1 PhysMath durable families (spec §5.6).
+// Family constants for the 20 Phase-1 PhysMath durable families: the 16
+// original (spec §5.6) plus SymmetricBilinear, Contraction, Domain, Integral (K1
+// foundation slice A1-A3, representation + structural validation only).
 var (
 	FamilyExpression          = FamilyID{NamespacePhysMath, "expression/1", "1"}
 	FamilyFunction            = FamilyID{NamespacePhysMath, "function/1", "1"}
@@ -48,6 +50,7 @@ func AllPhysMathFamilies() []FamilyID {
 		FamilyTensor, FamilyIndex, FamilyCollection, FamilyOperatorApplication,
 		FamilyTransformation, FamilyRelation, FamilyEquation, FamilyEquationSet,
 		FamilyDefinition, FamilyCondition, FamilyDerivation, FamilyTheorem,
+		FamilySymmetricBilinear, FamilyContraction, FamilyDomain, FamilyIntegral,
 	}
 }
 
@@ -478,8 +481,21 @@ func (o OperatorApplication) Encode() ([]byte, error) {
 
 // Validate enforces the Phase-1 operator contract.
 func (o OperatorApplication) Validate() error {
-	if o.OperatorID != OperatorReservedID {
-		return fmt.Errorf("physmath: OperatorID %q not executable in Phase 1", o.OperatorID)
+	if !ValidOperatorID(o.OperatorID) {
+		return fmt.Errorf("physmath: OperatorID %q not in reserved vocabulary", o.OperatorID)
+	}
+	if o.OperatorID == OperatorCovariantDerivative {
+		// Slice 1: covariant_derivative carries no parameters; the target
+		// arrives via Args (expression/1 or tensor/1 per TargetChecks).
+		if len(o.Parameters) != 0 {
+			return fmt.Errorf("physmath: covariant_derivative takes no parameters in slice 1")
+		}
+		for i, a := range o.Args {
+			if err := validateRefGrammar(fmt.Sprintf("OperatorApplication.Args[%d]", i), a); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	d := artifact.NewDecoder(o.Parameters)
 	if _, err := artifact.DecodeArtifactRef(d); err != nil {
@@ -509,14 +525,20 @@ func (o OperatorApplication) Validate() error {
 	return nil
 }
 
-// TargetChecks: Args → expression/1. (OperatorRef absent: no check.)
+// TargetChecks: differentiate Args → expression/1; covariant_derivative
+// Args → expression/1 or tensor/1 (tensor target, never executed).
+// (OperatorRef absent: no check.)
 func (o OperatorApplication) TargetChecks() []TargetCheck {
+	allowed := []FamilyID{FamilyExpression}
+	if o.OperatorID == OperatorCovariantDerivative {
+		allowed = []FamilyID{FamilyExpression, FamilyTensor}
+	}
 	checks := make([]TargetCheck, len(o.Args))
 	for i, a := range o.Args {
 		checks[i] = TargetCheck{
 			Field:   fmt.Sprintf("OperatorApplication.Args[%d]", i),
 			Ref:     a,
-			Allowed: []FamilyID{FamilyExpression},
+			Allowed: allowed,
 		}
 	}
 	return checks
@@ -705,6 +727,9 @@ func (c MathCondition) TargetChecks() []TargetCheck {
 var premiseFamilies = []FamilyID{
 	FamilyExpression, FamilyFunction, FamilyRelation,
 	FamilyEquation, FamilyDefinition, FamilyCondition,
+	// K1 slice context families (validated data; never step outputs):
+	FamilyTensor, FamilyIndex, FamilySymmetricBilinear, FamilyContraction,
+	FamilyDomain, FamilyIntegral,
 }
 
 // resultFamilies is the closed result family set (spec §12.3): premises minus
@@ -712,6 +737,9 @@ var premiseFamilies = []FamilyID{
 var resultFamilies = []FamilyID{
 	FamilyExpression, FamilyFunction, FamilyRelation,
 	FamilyEquation, FamilyDefinition,
+	// Carried-only (steps produce expression/1; see checkStepFamilies):
+	FamilyTensor, FamilyIndex, FamilySymmetricBilinear, FamilyContraction,
+	FamilyDomain, FamilyIntegral,
 }
 
 // DerivationStep is inline data inside physmath/derivation/1 (spec §12.2). It has
