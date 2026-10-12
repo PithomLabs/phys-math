@@ -212,6 +212,41 @@ func TestSimplifyPowZeroCondition(t *testing.T) {
 	}
 }
 
+// Neg(Rational) folds to the negated rational (additive-inverse closure
+// of the exact-rational folds). Non-rational operands are untouched, and
+// rational sums then reach the all-Rational fold: Add(4, Neg(6)) -> -2.
+func TestSimplifyNegRational(t *testing.T) {
+	s := NewMemStore()
+	in := mustStoreExpr(t, s, Neg(MustRational(6, 1)))
+	res := applyRule(t, s, RuleExprSimplify, []artifact.ArtifactRef{in}, nil, nil)
+	if got := mustResolve(t, s, res.OutputRef); !got.Equal(MustRational(-6, 1)) {
+		t.Fatal("Neg(6) did not fold to -6")
+	}
+	sum := mustStoreExpr(t, s, Add(MustRational(4, 1), Neg(MustRational(6, 1))))
+	res2 := applyRule(t, s, RuleExprSimplify, []artifact.ArtifactRef{sum}, nil, nil)
+	if got := mustResolve(t, s, res2.OutputRef); !got.Equal(MustRational(-2, 1)) {
+		t.Fatal("Add(4, Neg(6)) did not fold to -2")
+	}
+	// Non-rational negation is not folded.
+	x := NewEphemeralSymbol("x")
+	sym := mustStoreExpr(t, s, Neg(x))
+	res3 := applyRule(t, s, RuleExprSimplify, []artifact.ArtifactRef{sym}, nil, nil)
+	want3, _ := Canonicalize(Neg(x))
+	if got := mustResolve(t, s, res3.OutputRef); !got.Equal(want3) {
+		t.Fatal("Neg(symbol) altered")
+	}
+	if err := Replay(s, Derivation{
+		PremiseRefs: []artifact.ArtifactRef{sum},
+		Steps: []DerivationStep{{
+			Ordinal: 0, ProducerNamespace: NamespacePhysMath, RuleID: RuleExprSimplify,
+			InputRefs: []artifact.ArtifactRef{sum}, OutputRef: res2.OutputRef,
+		}},
+		ResultRefs: []artifact.ArtifactRef{res2.OutputRef},
+	}, nil); err != nil {
+		t.Fatalf("neg-fold derivation does not replay: %v", err)
+	}
+}
+
 // §25.15: branch selection.
 func TestSelectBranch(t *testing.T) {
 	s := NewMemStore()

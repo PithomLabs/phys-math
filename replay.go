@@ -131,12 +131,12 @@ func checkStepFamilies(store Store, s DerivationStep) error {
 		return fmt.Errorf("physmath: rule %s output must be expression/1", s.RuleID)
 	}
 	switch s.RuleID {
-	case RuleExprCanon, RuleExprSimplify, RuleRatNormalize, RuleSelectBranch:
+	case RuleExprCanon, RuleExprSimplify, RuleRatNormalize, RuleSelectBranch, RuleExprCombine:
 		if len(s.InputRefs) != 1 {
 			return fmt.Errorf("physmath: rule %s arity // families: want 1 input", s.RuleID)
 		}
 		return exprOnly(s.InputRefs, "input")
-	case RuleExprApply, RuleDifferentiate:
+	case RuleExprApply, RuleDifferentiate, RuleTotalDerivative:
 		if len(s.InputRefs) != 2 {
 			return fmt.Errorf("physmath: rule %s arity // families: want 2 inputs", s.RuleID)
 		}

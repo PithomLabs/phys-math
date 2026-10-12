@@ -3,7 +3,7 @@
 //
 // It owns theory-neutral mathematics: expressions, functions, parameters,
 // tensors, transformations, derivations, theorems, canonical identity,
-// and the seven closed executable rules. It owns NO physical interpretation,
+// and the nine closed executable rules. It owns NO physical interpretation,
 // theory names, assumptions, conventions, or trust semantics.
 //
 // Every exported API must be explainable without naming a physical theory

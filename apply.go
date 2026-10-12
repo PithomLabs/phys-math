@@ -270,8 +270,11 @@ func ruleSubstitute(store Store, inv Invocation) (Expr, error) {
 // Encode(BoundParameterRef) || UInt32BE(Order), Order >= 1. The BPR must
 // reference the supplied declaring function and a declared slot. Closed
 // derivative rules only; Call/Relation/BranchSet/Sqrt differentiation is out
-// of scope and fails. Pow requires a nonnegative integer Rational exponent.
-// Order > 1 differentiates repeatedly in one invocation. Non-target symbols
+// of scope and fails. Pow requires an integer Rational exponent: positive
+// exponents differentiate unconditionally, while negative exponents
+// additionally require an exact NEQ(base, 0) condition in context (fail
+// closed without it; the denominator is never assumed nonzero). Order > 1
+// differentiates repeatedly in one invocation. Non-target symbols
 // (other parameters, constants, unbound names) differentiate to 0 as
 // independent quantities; this is ordinary partial differentiation, not a new
 // semantic rule.
@@ -315,9 +318,17 @@ func ruleDifferentiate(store Store, inv Invocation) (Expr, error) {
 	if order < 1 {
 		return Expr{}, fmt.Errorf("%w: Order must be >= 1", ErrBadParameters)
 	}
+	var bodies [][]byte
+	for _, c := range normalizeConditionRefs(inv.ConditionRefs) {
+		body, err := resolveConditionBody(store, c)
+		if err != nil {
+			return Expr{}, err
+		}
+		bodies = append(bodies, body)
+	}
 	out := target
 	for i := uint32(0); i < order; i++ {
-		out, err = differentiateOnce(bpr.ParameterID, out)
+		out, err = differentiateOnce(bpr.ParameterID, out, bodies)
 		if err != nil {
 			return Expr{}, err
 		}
@@ -325,7 +336,7 @@ func ruleDifferentiate(store Store, inv Invocation) (Expr, error) {
 	return Canonicalize(out)
 }
 
-func differentiateOnce(target ParameterID, e Expr) (Expr, error) {
+func differentiateOnce(target ParameterID, e Expr, conds [][]byte) (Expr, error) {
 	one := MustRational(1, 1)
 	zero := MustRational(0, 1)
 	switch e.Kind {
@@ -339,7 +350,7 @@ func differentiateOnce(target ParameterID, e Expr) (Expr, error) {
 	case TagAdd:
 		ds := make([]Expr, len(e.Children))
 		for i, c := range e.Children {
-			dc, err := differentiateOnce(target, c)
+			dc, err := differentiateOnce(target, c, conds)
 			if err != nil {
 				return Expr{}, err
 			}
@@ -351,11 +362,11 @@ func differentiateOnce(target ParameterID, e Expr) (Expr, error) {
 			return zero, nil
 		}
 		if len(e.Children) == 1 {
-			return differentiateOnce(target, e.Children[0])
+			return differentiateOnce(target, e.Children[0], conds)
 		}
 		terms := make([]Expr, len(e.Children))
 		for i, c := range e.Children {
-			dc, err := differentiateOnce(target, c)
+			dc, err := differentiateOnce(target, c, conds)
 			if err != nil {
 				return Expr{}, err
 			}
@@ -370,7 +381,7 @@ func differentiateOnce(target ParameterID, e Expr) (Expr, error) {
 		}
 		return Add(terms...), nil
 	case TagNeg:
-		dc, err := differentiateOnce(target, *e.Operand)
+		dc, err := differentiateOnce(target, *e.Operand, conds)
 		if err != nil {
 			return Expr{}, err
 		}
@@ -381,15 +392,32 @@ func differentiateOnce(target ParameterID, e Expr) (Expr, error) {
 		}
 		n := e.Exp.Numerator.ToBig()
 		dn := e.Exp.Denominator.ToBig()
-		if dn.Cmp(big.NewInt(1)) != 0 || n.Sign() < 0 {
-			return Expr{}, fmt.Errorf("%w: Pow exponent must be nonnegative integer", ErrBadInput)
+		if dn.Cmp(big.NewInt(1)) != 0 {
+			return Expr{}, fmt.Errorf("%w: Pow exponent must be integer", ErrBadInput)
 		}
 		if n.Sign() == 0 {
 			return zero, nil
 		}
+		// First power: d(u^1)/dx = du/dx directly. Constructing the
+		// uniform-rule form Mul(1, Pow(u,0), du) would manufacture a
+		// Pow(u,0) node whose later simplification demands an exact
+		// NEQ(u,0) condition the mathematics never requires. Returning
+		// the base derivative is exact for all u (it equals 1 only when
+		// du/dx actually is 1) and leaves general u^0 safety intact.
+		if n.Cmp(big.NewInt(1)) == 0 {
+			d1, err := differentiateOnce(target, *e.Base, conds)
+			if err != nil {
+				return Expr{}, err
+			}
+			return d1, nil
+		}
+		if n.Sign() < 0 && !nonZeroConditionMet(*e.Base, conds) {
+			return Expr{}, fmt.Errorf("%w: Pow negative exponent without exact base != 0 condition",
+				ErrMissingCondition)
+		}
 		nRat, _ := NewRational(n, big.NewInt(1))
 		nMinus, _ := NewRational(new(big.Int).Sub(n, big.NewInt(1)), big.NewInt(1))
-		db, err := differentiateOnce(target, *e.Base)
+		db, err := differentiateOnce(target, *e.Base, conds)
 		if err != nil {
 			return Expr{}, err
 		}
