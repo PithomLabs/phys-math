@@ -93,7 +93,11 @@ func resolveFunction(store Store, ref artifact.ArtifactRef) (Function, error) {
 }
 
 // DecodeFunction decodes a physmath/function/1 canonical payload:
-// Sequence(ParameterIDs as raw 32-byte values) || BodyRef.
+// Sequence(ParameterIDs as raw 32-byte values) || BodyRef || optional
+// Sequence(display names). A trailing names sequence is accepted when
+// present and must match the parameter count with non-empty entries;
+// its absence decodes to nil (legacy payloads remain readable, though
+// trusted differentiation entry points require the metadata).
 func DecodeFunction(d *artifact.Decoder) (Function, error) {
 	n, err := d.SequenceCount()
 	if err != nil {
@@ -112,6 +116,34 @@ func DecodeFunction(d *artifact.Decoder) (Function, error) {
 		return Function{}, err
 	}
 	fn := Function{ParameterIDs: ids, BodyRef: body}
+	if d.Exhausted() {
+		if err := fn.Validate(); err != nil {
+			return Function{}, err
+		}
+		return fn, nil
+	}
+	m, err := d.SequenceCount()
+	if err != nil {
+		return Function{}, fmt.Errorf("physmath: function missing name sequence: %w", err)
+	}
+	if m != n {
+		return Function{}, fmt.Errorf("physmath: ParamNames %d != ParameterIDs %d", m, n)
+	}
+	names := make([]string, 0, m)
+	for i := 0; i < m; i++ {
+		name, err := d.String()
+		if err != nil {
+			return Function{}, fmt.Errorf("physmath: function bad name %d: %w", i, err)
+		}
+		if name == "" {
+			return Function{}, fmt.Errorf("physmath: empty ParamNames[%d]", i)
+		}
+		names = append(names, name)
+	}
+	if !d.Exhausted() {
+		return Function{}, fmt.Errorf("physmath: trailing bytes in function payload")
+	}
+	fn.ParamNames = names
 	if err := fn.Validate(); err != nil {
 		return Function{}, err
 	}

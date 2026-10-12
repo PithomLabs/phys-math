@@ -16,7 +16,7 @@ func differentiateFixture(t *testing.T, s Store) (arg, fnRef artifact.ArtifactRe
 	t.Helper()
 	p0 := DeriveParameterID(0)
 	targetID = p0
-	fn, _ := mustStoreFunction(t, s, 1, NewBoundSymbol("x", p0))
+	fn, _ := mustStoreFunction(t, s, []string{"x"}, NewBoundSymbol("x", p0))
 	target := mustStoreExpr(t, s, Add(
 		Pow(NewBoundSymbol("x", p0), MustRational(2, 1)),
 		MustRational(1, 1)))

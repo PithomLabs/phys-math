@@ -45,7 +45,8 @@ func idSetup(t *testing.T, s Store) idHandles {
 		t.Fatal(err)
 	}
 	fnObj := Function{ParameterIDs: []ParameterID{px, py},
-		BodyRef: mustStoreExpr(t, s, Mul(x, y))}
+		ParamNames: []string{"x", "y"},
+		BodyRef:    mustStoreExpr(t, s, Mul(x, y))}
 	fnBytes, err := fnObj.Encode()
 	if err != nil {
 		t.Fatal(err)

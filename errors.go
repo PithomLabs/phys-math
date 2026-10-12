@@ -22,4 +22,9 @@ var (
 	// ErrSignatureUnverifiable: diagonal entry not rationally decidable;
 	// uncertainty preserved, never asserted (R3 signature validation).
 	ErrSignatureUnverifiable = errors.New("physmath: signature not decidable")
+	// ErrMissingIdentity: a trusted entry point requires parameter-identity
+	// metadata (Function display names) that the artifact does not carry.
+	// Decoding and structural validation succeed without it; only trusted
+	// differentiation refuses to proceed.
+	ErrMissingIdentity = errors.New("physmath: missing parameter identity metadata")
 )

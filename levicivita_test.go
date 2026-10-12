@@ -62,7 +62,9 @@ func polarSetup(t *testing.T, s Store) (chart, metric, fn artifact.ArtifactRef, 
 		t.Fatal(err)
 	}
 	_ = fnBody
-	fnObj := Function{ParameterIDs: []ParameterID{pr, pt}, BodyRef: mustStoreExpr(t, s, r)}
+	fnObj := Function{ParameterIDs: []ParameterID{pr, pt},
+		ParamNames: []string{"r", "theta"},
+		BodyRef:    mustStoreExpr(t, s, r)}
 	fnBytes, err := fnObj.Encode()
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +192,8 @@ func TestLeviCivitaNegatives(t *testing.T) {
 	chart3, _, _ := chartFixture(t, s, "x", "y", "z")
 	pids := []ParameterID{DeriveParameterID(0), DeriveParameterID(1), DeriveParameterID(2)}
 	fn3 := Function{ParameterIDs: pids,
-		BodyRef: mustStoreExpr(t, s, NewBoundSymbol("q", pids[0]))}
+		ParamNames: []string{"x", "y", "z"},
+		BodyRef:    mustStoreExpr(t, s, NewBoundSymbol("q", pids[0]))}
 	fn3bytes, err := fn3.Encode()
 	if err != nil {
 		t.Fatal(err)
