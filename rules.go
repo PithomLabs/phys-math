@@ -54,6 +54,10 @@ func Apply(store Store, inv Invocation) (TransformResult, error) {
 		out, err = ruleSubstitute(store, inv)
 	case RuleDifferentiate:
 		out, err = ruleDifferentiate(store, inv)
+	case RuleTotalDerivative:
+		out, err = ruleTotalDerivative(store, inv)
+	case RuleExprCombine:
+		out, err = ruleCombine(store, inv)
 	default:
 		return TransformResult{}, fmt.Errorf("physmath: unhandled rule %q: %w", inv.RuleID, ErrUnknownRuleID)
 	}

@@ -500,19 +500,6 @@ func CheckContractionEvaluation(store Store, c ContractionEvaluation) error {
 	if err != nil {
 		return err
 	}
-	// Recompute ordered expected premises (idempotent content-addressed
-	// mints, mirroring diagonalProductRef).
-	expected := make([]artifact.ArtifactRef, 0, in.dim)
-	for i := 0; i < in.dim; i++ {
-		pref, err := PutExpression(store, contractionPremise(in, i))
-		if err != nil {
-			return err
-		}
-		expected = append(expected, pref)
-	}
-	if !refSetEqual(dd.PremiseRefs, expected) {
-		return fmt.Errorf("physmath: contraction derivation premises do not match recomputed premises")
-	}
 	if len(dd.Steps) != 2*in.dim {
 		return fmt.Errorf("physmath: contraction derivation must have exactly %d steps, got %d", 2*in.dim, len(dd.Steps))
 	}
@@ -544,14 +531,32 @@ func CheckContractionEvaluation(store Store, c ContractionEvaluation) error {
 		}
 		outputs = append(outputs, s1.OutputRef)
 	}
-	if !refMultisetEqual(inputs, expected) {
-		return fmt.Errorf("physmath: contraction derivation step premises do not match recomputed premises")
-	}
 	if !refSetEqual(dd.ResultRefs, outputs) {
 		return fmt.Errorf("physmath: contraction derivation results do not match step outputs")
 	}
+	// Replay BEFORE recomputation (AGENTS.md §9): availability is enforced
+	// on as-stored artifacts; recomputed mints below must not heal missing
+	// evidence before this gate rejects it.
 	if err := Replay(store, dd, nil); err != nil {
 		return fmt.Errorf("physmath: contraction derivation does not replay: %w", err)
+	}
+	// Recompute ordered expected premises (idempotent content-addressed
+	// mints, mirroring diagonalProductRef) and verify step linkage against
+	// them. By this point replay has established availability, so these
+	// mints reproduce — never repair — the recorded evidence.
+	expected := make([]artifact.ArtifactRef, 0, in.dim)
+	for i := 0; i < in.dim; i++ {
+		pref, err := PutExpression(store, contractionPremise(in, i))
+		if err != nil {
+			return err
+		}
+		expected = append(expected, pref)
+	}
+	if !refSetEqual(dd.PremiseRefs, expected) {
+		return fmt.Errorf("physmath: contraction derivation premises do not match recomputed premises")
+	}
+	if !refMultisetEqual(inputs, expected) {
+		return fmt.Errorf("physmath: contraction derivation step premises do not match recomputed premises")
 	}
 	rfam, rpayload, err := store.Lookup(c.ResultTensorRef)
 	if err != nil {

@@ -21,7 +21,7 @@ type FamilyID struct {
 	SchemaVersion string
 }
 
-// Family constants for the 22 Phase-1 PhysMath durable families: the 16
+// Family constants for the 23 Phase-1 PhysMath durable families: the 16
 // original (spec §5.6) plus SymmetricBilinear, Contraction, Domain, Integral (K1
 // foundation slice A1-A3, representation + structural validation only).
 var (
@@ -51,29 +51,32 @@ func AllPhysMathFamilies() []FamilyID {
 		FamilyTransformation, FamilyRelation, FamilyEquation, FamilyEquationSet,
 		FamilyDefinition, FamilyCondition, FamilyDerivation, FamilyTheorem,
 		FamilySymmetricBilinear, FamilyContraction, FamilyDomain, FamilyIntegral,
-		FamilyVolumeDensity, FamilyContractionEvaluation,
+		FamilyVolumeDensity, FamilyContractionEvaluation, FamilyVariationReduction,
 	}
 }
 
 // Phase-1 executable rule identities (spec §§11.5, 17; plan9.3 D29).
 const (
-	RuleExprCanon      = "EXPR-CANON-001"
-	RuleExprSimplify   = "EXPR-SIMPLIFY-001"
-	RuleExprSubstitute = "EXPR-SUBSTITUTE-001"
-	RuleRatNormalize   = "RAT-NORMALIZE-001"
-	RuleDifferentiate  = "DIFFERENTIATE-001"
-	RuleSelectBranch   = "SELECT-BRANCH-001"
-	RuleExprApply      = "EXPR-APPLY-001"
+	RuleExprCanon       = "EXPR-CANON-001"
+	RuleExprSimplify    = "EXPR-SIMPLIFY-001"
+	RuleExprSubstitute  = "EXPR-SUBSTITUTE-001"
+	RuleRatNormalize    = "RAT-NORMALIZE-001"
+	RuleDifferentiate   = "DIFFERENTIATE-001"
+	RuleTotalDerivative = "TOTAL-DERIVATIVE-001"
+	RuleExprCombine     = "EXPR-COMBINE-001"
+	RuleSelectBranch    = "SELECT-BRANCH-001"
+	RuleExprApply       = "EXPR-APPLY-001"
 )
 
 // Phase1Rules is the exhaustive executable rule vocabulary.
 var Phase1Rules = []string{
 	RuleExprCanon, RuleExprSimplify, RuleExprSubstitute, RuleRatNormalize,
-	RuleDifferentiate, RuleSelectBranch, RuleExprApply,
+	RuleDifferentiate, RuleSelectBranch, RuleExprApply, RuleTotalDerivative,
+	RuleExprCombine,
 }
 
 // ValidPhase1RulePair reports whether (producer, rule) is executable in Phase 1:
-// exactly (physmath, one of the seven closed RuleIDs). Unknown pairs fail closed.
+// exactly (physmath, one of the nine closed RuleIDs). Unknown pairs fail closed.
 func ValidPhase1RulePair(producer, rule string) bool {
 	if producer != NamespacePhysMath {
 		return false
@@ -730,7 +733,7 @@ var premiseFamilies = []FamilyID{
 	FamilyEquation, FamilyDefinition, FamilyCondition,
 	// K1 slice context families (validated data; never step outputs):
 	FamilyTensor, FamilyIndex, FamilySymmetricBilinear, FamilyContraction,
-	FamilyVolumeDensity, FamilyContractionEvaluation,
+	FamilyVolumeDensity, FamilyContractionEvaluation, FamilyVariationReduction,
 	FamilyDomain, FamilyIntegral,
 }
 
@@ -741,7 +744,7 @@ var resultFamilies = []FamilyID{
 	FamilyEquation, FamilyDefinition,
 	// Carried-only (steps produce expression/1; see checkStepFamilies):
 	FamilyTensor, FamilyIndex, FamilySymmetricBilinear, FamilyContraction,
-	FamilyVolumeDensity, FamilyContractionEvaluation,
+	FamilyVolumeDensity, FamilyContractionEvaluation, FamilyVariationReduction,
 	FamilyDomain, FamilyIntegral,
 }
 

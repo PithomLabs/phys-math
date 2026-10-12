@@ -715,6 +715,107 @@ func TestContractionEvaluationCorrupted(t *testing.T) {
 	}
 }
 
+// TestContractionEvaluationMissingPremisePayload verifies the AGENTS.md §9
+// invariant: a derivation premise whose payload is absent from the store
+// fails at replay availability even though premise recomputation could
+// re-mint identical bytes. Recomputation must never heal missing evidence.
+func TestContractionEvaluationMissingPremisePayload(t *testing.T) {
+	s := NewMemStore()
+	sp := spaceRef(t, s, "heal_space")
+	ia := idxRef(t, s, "a", VarianceCovariant, sp)
+	ib := idxRef(t, s, "b", VarianceCovariant, sp)
+	ix := idxRef(t, s, "b", VarianceContravariant, sp)
+	tref := tensorRef(t, s, 2, 2, []artifact.ArtifactRef{ia, ib}, rationalMatrix(2, 0, 0, 3))
+	vref := tensorRef(t, s, 1, 2, []artifact.ArtifactRef{ix}, rationalMatrix(1, 1))
+	c, _, d := evalRecord(t, s, tref, vref, 1)
+	if len(d.PremiseRefs) == 0 {
+		t.Fatal("need at least one premise")
+	}
+	missing := d.PremiseRefs[0]
+	partial := NewMemStore()
+	seen := map[artifact.ArtifactRef]bool{}
+	var walk func(r artifact.ArtifactRef)
+	walk = func(r artifact.ArtifactRef) {
+		if seen[r] || r == missing {
+			return
+		}
+		seen[r] = true
+		fam, payload, err := s.Lookup(r)
+		if err != nil {
+			return
+		}
+		if _, err := partial.Put(fam, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, r := range append(append([]artifact.ArtifactRef{tref, vref, c.DerivationRef, c.ResultTensorRef},
+		d.PremiseRefs...), d.ResultRefs...) {
+		walk(r)
+	}
+	for _, st := range d.Steps {
+		for _, r := range append(append([]artifact.ArtifactRef{}, st.InputRefs...), st.OutputRef) {
+			walk(r)
+		}
+	}
+	for _, r := range append(append([]artifact.ArtifactRef{}, mustDecodeTensorRefs(t, s, tref)...),
+		mustDecodeTensorRefs(t, s, vref)...) {
+		walk(r)
+	}
+	if _, _, err := partial.Lookup(missing); err == nil {
+		t.Fatal("premise payload unexpectedly present")
+	}
+	if err := CheckContractionEvaluation(partial, c); err == nil {
+		t.Fatal("missing premise payload healed by recomputation")
+	}
+}
+
+// mustDecodeTensorRefs returns all index, component refs of a tensor.
+func mustDecodeTensorRefs(t *testing.T, s Store, ref artifact.ArtifactRef) []artifact.ArtifactRef {
+	t.Helper()
+	_, payload, err := s.Lookup(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tn, err := DecodeTensor(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := append([]artifact.ArtifactRef{}, tn.IndexRefs...)
+	out = append(out, tn.ComponentRefs...)
+	for _, ir := range tn.IndexRefs {
+		_, ipayload, err := s.Lookup(ir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		idx, err := DecodeIndex(ipayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if idx.Space != nil {
+			out = append(out, *idx.Space)
+			_, spayload, err := s.Lookup(*idx.Space)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = spayload
+			// Copy collection element refs too.
+			cd := artifact.NewDecoder(spayload)
+			n, err := cd.SequenceCount()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < n; i++ {
+				r, err := artifact.DecodeArtifactRef(cd)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out = append(out, r)
+			}
+		}
+	}
+	return out
+}
+
 func TestContractionEvaluationDroppedPremise(t *testing.T) {
 	s := NewMemStore()
 	sp := spaceRef(t, s, "drop_space")
