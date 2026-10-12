@@ -21,7 +21,7 @@ type FamilyID struct {
 	SchemaVersion string
 }
 
-// Family constants for the 21 Phase-1 PhysMath durable families: the 16
+// Family constants for the 22 Phase-1 PhysMath durable families: the 16
 // original (spec §5.6) plus SymmetricBilinear, Contraction, Domain, Integral (K1
 // foundation slice A1-A3, representation + structural validation only).
 var (
@@ -51,7 +51,7 @@ func AllPhysMathFamilies() []FamilyID {
 		FamilyTransformation, FamilyRelation, FamilyEquation, FamilyEquationSet,
 		FamilyDefinition, FamilyCondition, FamilyDerivation, FamilyTheorem,
 		FamilySymmetricBilinear, FamilyContraction, FamilyDomain, FamilyIntegral,
-		FamilyVolumeDensity,
+		FamilyVolumeDensity, FamilyContractionEvaluation,
 	}
 }
 
@@ -730,7 +730,7 @@ var premiseFamilies = []FamilyID{
 	FamilyEquation, FamilyDefinition, FamilyCondition,
 	// K1 slice context families (validated data; never step outputs):
 	FamilyTensor, FamilyIndex, FamilySymmetricBilinear, FamilyContraction,
-	FamilyVolumeDensity,
+	FamilyVolumeDensity, FamilyContractionEvaluation,
 	FamilyDomain, FamilyIntegral,
 }
 
@@ -741,7 +741,7 @@ var resultFamilies = []FamilyID{
 	FamilyEquation, FamilyDefinition,
 	// Carried-only (steps produce expression/1; see checkStepFamilies):
 	FamilyTensor, FamilyIndex, FamilySymmetricBilinear, FamilyContraction,
-	FamilyVolumeDensity,
+	FamilyVolumeDensity, FamilyContractionEvaluation,
 	FamilyDomain, FamilyIntegral,
 }
 
