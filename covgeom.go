@@ -345,6 +345,138 @@ func DecodeCoordParamMap(payload []byte) (CoordParamMap, error) {
 	return CoordParamMap{Entries: entries}, nil
 }
 
+// CheckDisjointIdentity enforces parameter-identity scoping for operations
+// that differentiate with respect to chart coordinates.
+//
+// Identity contract (established from the architecture):
+//   - A mathematical variable is its (display name, ParameterID) bytes;
+//     byte-identical symbols are the same variable by content addressing.
+//   - A differentiation variable is that plus declaring-function context
+//     (BoundParameterRef), because the differentiation machinery matches
+//     bare ParameterIDs: every same-PID symbol in range differentiates as
+//     the variable, regardless of which function declared it.
+//   - PIDs are ordinal-per-function, so cross-function PID reuse is
+//     structural, not a bug. Safety comes from constraining which
+//     (name, pid) pairs may appear in differentiating operands.
+//
+// The rule: for every symbol in the operand expressions whose ParameterID
+// is mapped (i.e. could be mistaken for a chart coordinate), its display
+// name must equal the chart coordinate's display name at that mapped
+// position. A mismatch means two mathematically distinct quantities share
+// a PID and one would differentiate as the other — fail closed, naming the
+// operand position, PID, and both displays. Non-mapped PIDs (independent
+// quantities such as model parameters) pass through untouched, as does
+// exact byte-identity reuse (shared legitimate identity).
+//
+// Chart coordinates must decode as symbols; anything else fails closed
+// (there is no display to compare). Malformed mappings, unresolvable
+// charts/coordinates/operands, and wrong families fail closed.
+//
+// Scope limit: this guards driver-level covariant paths that invoke it
+// (evaluator, Levi-Civita, and their checkers). Raw DIFFERENTIATE-001
+// callers remain outside its scope by design; see the limitation record.
+func CheckDisjointIdentity(store Store, chartRef artifact.ArtifactRef, mapping CoordParamMap, declaringFnRef artifact.ArtifactRef, operandRefs []artifact.ArtifactRef) error {
+	if err := CheckCoordParamMap(store, chartRef, mapping, declaringFnRef); err != nil {
+		return err
+	}
+	_, cpayload, err := store.Lookup(chartRef)
+	if err != nil {
+		return fmt.Errorf("physmath: disjointness chart unresolvable: %w", err)
+	}
+	chart, err := DecodeCoordinateSystem(cpayload)
+	if err != nil {
+		return err
+	}
+	coordDisplay := make([]string, len(chart.CoordinateRefs))
+	for i, r := range chart.CoordinateRefs {
+		fam, payload, err := store.Lookup(r)
+		if err != nil {
+			return fmt.Errorf("physmath: disjointness coordinate %d unresolvable: %w", i, err)
+		}
+		if fam != FamilyExpression {
+			return fmt.Errorf("physmath: disjointness coordinate %d is not expression/1: %w", i, ErrBadInput)
+		}
+		e, err := DecodeExpr(artifact.NewDecoder(payload))
+		if err != nil {
+			return fmt.Errorf("physmath: disjointness coordinate %d undecodable: %w", i, err)
+		}
+		if e.Kind != TagSymbol {
+			return fmt.Errorf("physmath: disjointness coordinate %d is not a symbol: %w", i, ErrBadInput)
+		}
+		coordDisplay[i] = e.DisplayName
+	}
+	mappedPID := make([]ParameterID, len(mapping.Entries))
+	for i, e := range mapping.Entries {
+		mappedPID[i] = e.ParameterID
+	}
+	for k, r := range operandRefs {
+		fam, payload, err := store.Lookup(r)
+		if err != nil {
+			return fmt.Errorf("physmath: disjointness operand %d unresolvable: %w", k, err)
+		}
+		if fam != FamilyExpression {
+			return fmt.Errorf("physmath: disjointness operand %d is not expression/1: %w", k, ErrBadInput)
+		}
+		e, err := DecodeExpr(artifact.NewDecoder(payload))
+		if err != nil {
+			return fmt.Errorf("physmath: disjointness operand %d undecodable: %w", k, err)
+		}
+		if err := checkSymbolsDisjoint(e, k, mappedPID, coordDisplay); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkSymbolsDisjoint walks one expression, rejecting symbols whose PID
+// is mapped but whose display differs from the mapped coordinate display.
+func checkSymbolsDisjoint(e Expr, refPos int, mappedPID []ParameterID, coordDisplay []string) error {
+	if e.Kind == TagSymbol && e.ParamID != nil {
+		for i, pid := range mappedPID {
+			if *e.ParamID == pid && e.DisplayName != coordDisplay[i] {
+				return fmt.Errorf("physmath: operand %d binds %q to chart PID %d reserved for coordinate %q: %w",
+					refPos, e.DisplayName, i, coordDisplay[i], ErrBadInput)
+			}
+		}
+	}
+	switch e.Kind {
+	case TagAdd, TagMul:
+		for _, c := range e.Children {
+			if err := checkSymbolsDisjoint(c, refPos, mappedPID, coordDisplay); err != nil {
+				return err
+			}
+		}
+	case TagNeg:
+		return checkSymbolsDisjoint(*e.Operand, refPos, mappedPID, coordDisplay)
+	case TagPow:
+		if err := checkSymbolsDisjoint(*e.Base, refPos, mappedPID, coordDisplay); err != nil {
+			return err
+		}
+		return checkSymbolsDisjoint(*e.Exp, refPos, mappedPID, coordDisplay)
+	case TagSqrt:
+		return checkSymbolsDisjoint(*e.Radicand, refPos, mappedPID, coordDisplay)
+	case TagCall:
+		for _, a := range e.Args {
+			if err := checkSymbolsDisjoint(a, refPos, mappedPID, coordDisplay); err != nil {
+				return err
+			}
+		}
+	case TagRelation:
+		if err := checkSymbolsDisjoint(*e.Left, refPos, mappedPID, coordDisplay); err != nil {
+			return err
+		}
+		return checkSymbolsDisjoint(*e.Right, refPos, mappedPID, coordDisplay)
+	case TagBranch:
+		for _, b := range e.Branches {
+			if err := checkSymbolsDisjoint(b, refPos, mappedPID, coordDisplay); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// CheckCoordParamMap validates a mapping against a coordinate system and
 // CheckCoordParamMap validates a mapping against a coordinate system and
 // the declaring function supplied to differentiation: entry count equals
 // chart dimension, every entry references that declaring function, and

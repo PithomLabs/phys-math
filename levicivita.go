@@ -93,6 +93,13 @@ func LeviCivita(store Store, metricRef, chartRef artifact.ArtifactRef, mapping C
 			}
 		}
 	}
+	// Parameter-identity scoping over the metric components, before the
+	// first mint below (the inverse path mints). Metric symbols sharing a
+	// mapped PID under a different display would differentiate as chart
+	// coordinates.
+	if err := CheckDisjointIdentity(store, chartRef, mapping, declaringFnRef, metric.ComponentRefs); err != nil {
+		return fail(err)
+	}
 	// General inverse through the shared matrix path (never a diagonal
 	// shortcut, even for diagonal inputs).
 	detRef, invComps, invDeriv, err := InverseMatrix(store, metricRef, conds)

@@ -158,6 +158,15 @@ func resolveCovInputs(store Store, fieldRef, connRef artifact.ArtifactRef, mappi
 		}
 		coords[i] = e
 	}
+	// Parameter-identity scoping: no operand symbol may bind a mapped PID
+	// under a different display name, or differentiation would mistake one
+	// quantity for a chart coordinate. Runs before the first mint below,
+	// so it also covers checker recomputation and Laplacian stages, which
+	// all route through this function.
+	if err := CheckDisjointIdentity(store, field.CoordinateSystemRef, mapping, declaringFnRef,
+		append(append([]artifact.ArtifactRef{}, tn.ComponentRefs...), conn.CoefficientRefs...)); err != nil {
+		return fail(err)
+	}
 	// The derivative-slot index is a slot descriptor (COVARIANT over the
 	// chart space), minted deterministically so recomputation reproduces it.
 	diPayload, err := Index{Label: "d", Variance: VarianceCovariant, Space: &chart.SpaceRef}.Encode()
