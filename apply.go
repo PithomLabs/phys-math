@@ -398,6 +398,19 @@ func differentiateOnce(target ParameterID, e Expr, conds [][]byte) (Expr, error)
 		if n.Sign() == 0 {
 			return zero, nil
 		}
+		// First power: d(u^1)/dx = du/dx directly. Constructing the
+		// uniform-rule form Mul(1, Pow(u,0), du) would manufacture a
+		// Pow(u,0) node whose later simplification demands an exact
+		// NEQ(u,0) condition the mathematics never requires. Returning
+		// the base derivative is exact for all u (it equals 1 only when
+		// du/dx actually is 1) and leaves general u^0 safety intact.
+		if n.Cmp(big.NewInt(1)) == 0 {
+			d1, err := differentiateOnce(target, *e.Base, conds)
+			if err != nil {
+				return Expr{}, err
+			}
+			return d1, nil
+		}
 		if n.Sign() < 0 && !nonZeroConditionMet(*e.Base, conds) {
 			return Expr{}, fmt.Errorf("%w: Pow negative exponent without exact base != 0 condition",
 				ErrMissingCondition)
