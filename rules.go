@@ -347,6 +347,17 @@ func simplifyStep(e Expr, condBodies [][]byte) (Expr, bool, error) {
 	if e.Kind == TagNeg && e.Operand.Kind == TagNeg {
 		return cloneExpr(*e.Operand.Operand), true, nil
 	}
+	// 1b. Neg(Rational r) -> Rational(-r): exact rational negation, the
+	// additive-inverse closure of the existing exact-rational folds. It
+	// lets rational Leibniz sums (e.g. Add(4, Neg(6))) reach the
+	// all-Rational fold. Non-rational operands are untouched.
+	if e.Kind == TagNeg && e.Operand.Kind == TagRational {
+		n, err := NewRational(new(big.Int).Neg(e.Operand.Numerator.ToBig()), e.Operand.Denominator.ToBig())
+		if err != nil {
+			return Expr{}, false, err
+		}
+		return n, true, nil
+	}
 	// 2/3. Add/Mul identity removal + 4. Mul zero annihilation + 5. folding.
 	if e.Kind == TagAdd || e.Kind == TagMul {
 		identity := MustRational(1, 1)
