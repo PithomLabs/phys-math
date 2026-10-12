@@ -19,4 +19,7 @@ var (
 	// ErrOperatorNotExecutable: reserved operator invoked for execution
 	// (A4 covariant_derivative reservation; K1 s1/s4-class steps).
 	ErrOperatorNotExecutable = errors.New("physmath: reserved operator is not executable")
+	// ErrSignatureUnverifiable: diagonal entry not rationally decidable;
+	// uncertainty preserved, never asserted (R3 signature validation).
+	ErrSignatureUnverifiable = errors.New("physmath: signature not decidable")
 )

@@ -21,7 +21,7 @@ type FamilyID struct {
 	SchemaVersion string
 }
 
-// Family constants for the 20 Phase-1 PhysMath durable families: the 16
+// Family constants for the 21 Phase-1 PhysMath durable families: the 16
 // original (spec §5.6) plus SymmetricBilinear, Contraction, Domain, Integral (K1
 // foundation slice A1-A3, representation + structural validation only).
 var (
@@ -51,6 +51,7 @@ func AllPhysMathFamilies() []FamilyID {
 		FamilyTransformation, FamilyRelation, FamilyEquation, FamilyEquationSet,
 		FamilyDefinition, FamilyCondition, FamilyDerivation, FamilyTheorem,
 		FamilySymmetricBilinear, FamilyContraction, FamilyDomain, FamilyIntegral,
+		FamilyVolumeDensity,
 	}
 }
 
@@ -729,6 +730,7 @@ var premiseFamilies = []FamilyID{
 	FamilyEquation, FamilyDefinition, FamilyCondition,
 	// K1 slice context families (validated data; never step outputs):
 	FamilyTensor, FamilyIndex, FamilySymmetricBilinear, FamilyContraction,
+	FamilyVolumeDensity,
 	FamilyDomain, FamilyIntegral,
 }
 
@@ -739,6 +741,7 @@ var resultFamilies = []FamilyID{
 	FamilyEquation, FamilyDefinition,
 	// Carried-only (steps produce expression/1; see checkStepFamilies):
 	FamilyTensor, FamilyIndex, FamilySymmetricBilinear, FamilyContraction,
+	FamilyVolumeDensity,
 	FamilyDomain, FamilyIntegral,
 }
 
@@ -855,6 +858,116 @@ func (d Derivation) ValidateStructure() error {
 		}
 	}
 	return nil
+}
+
+// decodeDerivationStep decodes one inline DerivationStep from a shared
+// cursor in canonical declaration order: UInt32(ordinal) ||
+// String(producer) || String(rule) || Sequence(inputs) || output ||
+// Set(conditions) || Bytes(parameters). All reference sequences are
+// self-delimiting (length-prefixed strings, fixed digests).
+func decodeDerivationStep(d *artifact.Decoder) (DerivationStep, error) {
+	ord, err := d.UInt32()
+	if err != nil {
+		return DerivationStep{}, fmt.Errorf("physmath: step missing ordinal: %w", err)
+	}
+	prod, err := d.String()
+	if err != nil {
+		return DerivationStep{}, fmt.Errorf("physmath: step missing producer: %w", err)
+	}
+	rule, err := d.String()
+	if err != nil {
+		return DerivationStep{}, fmt.Errorf("physmath: step missing rule: %w", err)
+	}
+	nin, err := d.SequenceCount()
+	if err != nil {
+		return DerivationStep{}, fmt.Errorf("physmath: step missing inputs: %w", err)
+	}
+	ins := make([]artifact.ArtifactRef, 0, nin)
+	for i := 0; i < nin; i++ {
+		r, err := artifact.DecodeArtifactRef(d)
+		if err != nil {
+			return DerivationStep{}, fmt.Errorf("physmath: step bad input %d: %w", i, err)
+		}
+		ins = append(ins, r)
+	}
+	out, err := artifact.DecodeArtifactRef(d)
+	if err != nil {
+		return DerivationStep{}, fmt.Errorf("physmath: step missing output: %w", err)
+	}
+	nc, err := d.SequenceCount()
+	if err != nil {
+		return DerivationStep{}, fmt.Errorf("physmath: step missing conditions: %w", err)
+	}
+	conds := make([]artifact.ArtifactRef, 0, nc)
+	for i := 0; i < nc; i++ {
+		r, err := artifact.DecodeArtifactRef(d)
+		if err != nil {
+			return DerivationStep{}, fmt.Errorf("physmath: step bad condition %d: %w", i, err)
+		}
+		conds = append(conds, r)
+	}
+	params, err := d.Bytes()
+	if err != nil {
+		return DerivationStep{}, fmt.Errorf("physmath: step missing parameters: %w", err)
+	}
+	return DerivationStep{
+		Ordinal: ord, ProducerNamespace: prod, RuleID: rule,
+		InputRefs: ins, OutputRef: out, ConditionRefs: conds, Parameters: params,
+	}, nil
+}
+
+// DecodeDerivation decodes a physmath/derivation/1 canonical payload:
+// Set(premises) || Sequence(steps, declaration order) || Set(results).
+// Steps are decoded inline from the shared cursor in declaration order.
+// It is representation only: no store Lookup, no Apply, no Replay. The
+// decoded value is validated with ValidateStructure (duplicate refs,
+// contiguous ordinals, known rule pairs, duplicate conditions).
+func DecodeDerivation(payload []byte) (Derivation, error) {
+	d := artifact.NewDecoder(payload)
+	np, err := d.SequenceCount()
+	if err != nil {
+		return Derivation{}, fmt.Errorf("physmath: derivation missing premises: %w", err)
+	}
+	pres := make([]artifact.ArtifactRef, 0, np)
+	for i := 0; i < np; i++ {
+		r, err := artifact.DecodeArtifactRef(d)
+		if err != nil {
+			return Derivation{}, fmt.Errorf("physmath: derivation bad premise %d: %w", i, err)
+		}
+		pres = append(pres, r)
+	}
+	ns, err := d.SequenceCount()
+	if err != nil {
+		return Derivation{}, fmt.Errorf("physmath: derivation missing steps: %w", err)
+	}
+	steps := make([]DerivationStep, 0, ns)
+	for i := 0; i < ns; i++ {
+		s, err := decodeDerivationStep(d)
+		if err != nil {
+			return Derivation{}, err
+		}
+		steps = append(steps, s)
+	}
+	nr, err := d.SequenceCount()
+	if err != nil {
+		return Derivation{}, fmt.Errorf("physmath: derivation missing results: %w", err)
+	}
+	res := make([]artifact.ArtifactRef, 0, nr)
+	for i := 0; i < nr; i++ {
+		r, err := artifact.DecodeArtifactRef(d)
+		if err != nil {
+			return Derivation{}, fmt.Errorf("physmath: derivation bad result %d: %w", i, err)
+		}
+		res = append(res, r)
+	}
+	if !d.Exhausted() {
+		return Derivation{}, fmt.Errorf("physmath: trailing bytes in derivation payload")
+	}
+	dd := Derivation{PremiseRefs: pres, Steps: steps, ResultRefs: res}
+	if err := dd.ValidateStructure(); err != nil {
+		return Derivation{}, err
+	}
+	return dd, nil
 }
 
 // TargetChecks for premises/results against the closed family sets.
