@@ -40,7 +40,11 @@ func LeviCivita(store Store, metricRef, chartRef artifact.ArtifactRef, mapping C
 	if err != nil {
 		return fail(err)
 	}
-	if err := CheckCoordParamMap(store, chartRef, mapping, declaringFnRef); err != nil {
+	// Single shared chart-binding contract (Plan 1.14): mapping validity,
+	// exact chart-coordinate parameter identity, declaring-function names,
+	// and metric-operand disjointness, before the first mint below (the
+	// inverse path mints).
+	if err := ValidateCoordBinding(store, chartRef, mapping, declaringFnRef, metric.ComponentRefs); err != nil {
 		return fail(err)
 	}
 	cfam, cpayload, err := store.Lookup(chartRef)
@@ -93,13 +97,6 @@ func LeviCivita(store Store, metricRef, chartRef artifact.ArtifactRef, mapping C
 			}
 		}
 	}
-	// Parameter-identity scoping over the metric components, before the
-	// first mint below (the inverse path mints). Metric symbols sharing a
-	// mapped PID under a different display would differentiate as chart
-	// coordinates.
-	if err := CheckDisjointIdentity(store, chartRef, mapping, declaringFnRef, metric.ComponentRefs); err != nil {
-		return fail(err)
-	}
 	// General inverse through the shared matrix path (never a diagonal
 	// shortcut, even for diagonal inputs).
 	detRef, invComps, invDeriv, err := InverseMatrix(store, metricRef, conds)
@@ -115,23 +112,19 @@ func LeviCivita(store Store, metricRef, chartRef artifact.ArtifactRef, mapping C
 		}
 		ginv[i] = e
 	}
-	partial := func(comp artifact.ArtifactRef, coord uint32) (artifact.ArtifactRef, Expr, error) {
-		bpr := mapping.Entries[coord]
-		params := append(bpr.Encode(), artifact.EncodeUInt32(1)...)
-		res, err := Apply(store, Invocation{
-			ProducerNamespace: NamespacePhysMath, RuleID: RuleDifferentiate,
-			InputRefs:     []artifact.ArtifactRef{comp, declaringFnRef},
-			ConditionRefs: conds,
-			Parameters:    params,
-		})
+	partial := func(comp artifact.ArtifactRef, coord uint32) (artifact.ArtifactRef, artifact.ArtifactRef, DerivationStep, Expr, error) {
+		outRef, recordRef, gd, err := DifferentiateCoordinate(store, comp, chartRef, coord, mapping, declaringFnRef, 1, conds)
 		if err != nil {
-			return artifact.ArtifactRef{}, Expr{}, fmt.Errorf("physmath: metric partial failed: %w", err)
+			return artifact.ArtifactRef{}, artifact.ArtifactRef{}, DerivationStep{}, Expr{}, fmt.Errorf("physmath: metric partial failed: %w", err)
 		}
-		e, err := resolveExpression(store, res.OutputRef)
+		e, err := resolveExpression(store, outRef)
 		if err != nil {
-			return artifact.ArtifactRef{}, Expr{}, err
+			return artifact.ArtifactRef{}, artifact.ArtifactRef{}, DerivationStep{}, Expr{}, err
 		}
-		return res.OutputRef, e, nil
+		if len(gd.Steps) != 1 {
+			return artifact.ArtifactRef{}, artifact.ArtifactRef{}, DerivationStep{}, Expr{}, fmt.Errorf("physmath: guarded partial derivation shape broken: %w", ErrBadInput)
+		}
+		return outRef, recordRef, gd.Steps[0], e, nil
 	}
 	// Partials of every component w.r.t. every coordinate, each replayable
 	// on its own through DIFFERENTIATE-001.
@@ -144,26 +137,17 @@ func LeviCivita(store Store, metricRef, chartRef artifact.ArtifactRef, mapping C
 		dg[c] = make([]artifact.ArtifactRef, d*d)
 		dgExpr[c] = make([]Expr, d*d)
 		for k := 0; k < d*d; k++ {
-			out, e, err := partial(metric.ComponentRefs[k], uint32(c))
+			out, recordRef, pstep, e, err := partial(metric.ComponentRefs[k], uint32(c))
 			if err != nil {
 				return fail(err)
 			}
-			_ = out
-			// Record a replayable one-step derivation per partial.
-			bpr := mapping.Entries[c]
-			params := append(bpr.Encode(), artifact.EncodeUInt32(1)...)
+			// Each partial carries its guarded differentiation record;
+			// the record joins the derivation premises as evidence.
 			dg[c][k] = out
 			dgExpr[c][k] = e
-			partPremises = append(partPremises, metric.ComponentRefs[k])
+			partPremises = append(partPremises, metric.ComponentRefs[k], recordRef)
 			partResults = append(partResults, out)
-			partSteps = append(partSteps, DerivationStep{
-				Ordinal:           0,
-				ProducerNamespace: NamespacePhysMath, RuleID: RuleDifferentiate,
-				InputRefs:     []artifact.ArtifactRef{metric.ComponentRefs[k], declaringFnRef},
-				OutputRef:     out,
-				ConditionRefs: normalizeConditionRefs(conds),
-				Parameters:    params,
-			})
+			partSteps = append(partSteps, pstep)
 		}
 	}
 	// Assembly: Γ^ρ_μν = Σ_σ ½·g^ρσ·(∂_μ g_σν + ∂_ν g_σμ − ∂_σ g_μν).
