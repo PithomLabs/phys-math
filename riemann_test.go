@@ -1838,3 +1838,756 @@ func TestRiemannScalarAdversarial(t *testing.T) {
 		}
 	})
 }
+
+// prodSetup builds the 3D product chart (x,y,z) with metric
+// diag(1,(1+x^2)^2,1), mapping, declaring function, and determinant
+// condition. Block-diagonal decoupling makes z-index connection and
+// curvature vanish while the x-y block reproduces the 2D curved values.
+func prodSetup(t *testing.T, s Store) (chart, metric, fn artifact.ArtifactRef, mapping CoordParamMap, x, y, z Expr, cond artifact.ArtifactRef) {
+	t.Helper()
+	px := DeriveParameterID(0)
+	py := DeriveParameterID(1)
+	pz := DeriveParameterID(2)
+	x = NewBoundSymbol("x", px)
+	y = NewBoundSymbol("y", py)
+	z = NewBoundSymbol("z", pz)
+	desig := mustStoreExpr(t, s, NewEphemeralSymbol("prod_space"))
+	spaceRaw, err := Collection{ElementRefs: []artifact.ArtifactRef{desig}}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	space, err := s.Put(FamilyCollection, spaceRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := CoordinateSystem{Dimension: 3, CoordinateRefs: []artifact.ArtifactRef{
+		mustStoreExpr(t, s, x), mustStoreExpr(t, s, y), mustStoreExpr(t, s, z),
+	}, SpaceRef: space}
+	if err := cs.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	chart, err = s.Put(FamilyCoordinateSystem, cs.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := mustStoreExpr(t, s, MustRational(1, 1))
+	zero := mustStoreExpr(t, s, MustRational(0, 1))
+	f := Add(MustRational(1, 1), Pow(x, MustRational(2, 1)))
+	gyy := mustStoreExpr(t, s, Pow(f, MustRational(2, 1)))
+	m := SymmetricBilinear{Dimension: 3, ComponentRefs: []artifact.ArtifactRef{
+		one, zero, zero,
+		zero, gyy, zero,
+		zero, zero, one,
+	}}
+	if err := m.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	metric, err = s.Put(FamilySymmetricBilinear, m.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fnObj := Function{ParameterIDs: []ParameterID{px, py, pz},
+		ParamNames: []string{"x", "y", "z"},
+		BodyRef:    mustStoreExpr(t, s, x)}
+	fnBytes, err := fnObj.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn, err = s.Put(FamilyFunction, fnBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping = CoordParamMap{Entries: []BoundParameterRef{
+		{DeclaringArtifactRef: fn, ParameterID: px},
+		{DeclaringArtifactRef: fn, ParameterID: py},
+		{DeclaringArtifactRef: fn, ParameterID: pz},
+	}}
+	detRef, _, err := GeneralDeterminant(s, metric)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cond = detCond(t, s, detRef)
+	return chart, metric, fn, mapping, x, y, z, cond
+}
+
+// traceReverseComps resolves the ordered trace-reversed components.
+func traceReverseComps(t *testing.T, s Store, resultField artifact.ArtifactRef) []Expr {
+	t.Helper()
+	_, fpayload, err := s.Lookup(resultField)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rf, err := DecodeTensorField(fpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, tpayload, err := s.Lookup(rf.TensorRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := DecodeTensor(tpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	comps := make([]Expr, len(rt.ComponentRefs))
+	for i, r := range rt.ComponentRefs {
+		comps[i] = mustResolve(t, s, r)
+	}
+	return comps
+}
+
+// dumpStructured renders an expression as an indented tree for failure
+// messages and golden transcription. Test aid only.
+func dumpStructured(e Expr, ind string) string {
+	s := ""
+	switch e.Kind {
+	case TagRational:
+		return ind + "Q(" + e.Numerator.ToBig().String() + "/" + e.Denominator.ToBig().String() + ")"
+	case TagSymbol:
+		return ind + "S(" + e.DisplayName + ")"
+	case TagAdd:
+		s = ind + "Add[\n"
+	case TagMul:
+		s = ind + "Mul[\n"
+	case TagNeg:
+		return ind + "Neg(\n" + dumpStructured(*e.Operand, ind+"  ") + "\n" + ind + ")"
+	case TagPow:
+		return ind + "Pow(\n" + dumpStructured(*e.Base, ind+"  ") + "\n" + dumpStructured(*e.Exp, ind+"  ") + "\n" + ind + ")"
+	default:
+		return ind + "?()"
+	}
+	for _, c := range e.Children {
+		s += dumpStructured(c, ind+"  ") + "\n"
+	}
+	return s + ind + "]"
+}
+
+// TestRiemannTraceReverseTwoDim pins the 2D consistency golden: the curved
+// 2D Einstein tensor vanishes identically (trace identity), with factored
+// forms for the diagonal components and exact zeros off-diagonal. Point
+// values: every component 0 at x=0, 1, 2.
+func TestRiemannTraceReverseTwoDim(t *testing.T) {
+	s := NewMemStore()
+	chart, metric, fn, mapping, x, _, cond := curvedSetup(t, s)
+	conds := []artifact.ArtifactRef{cond}
+	_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, conds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, crec, _, err := EvaluateRiemannContraction(s, riemRec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, srec, _, err := EvaluateRiemannScalar(s, crec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, recRef, _, err := EvaluateRiemannTraceReverse(s, crec, srec)
+	if err != nil {
+		t.Fatalf("2d trace-reverse failed: %v", err)
+	}
+	comps := traceReverseComps(t, s, result)
+	if len(comps) != 4 {
+		t.Fatalf("2d trace-reverse has %d components, want 4", len(comps))
+	}
+	zero := MustRational(0, 1)
+	for _, i := range []int{1, 2} {
+		if !comps[i].Equal(zero) {
+			t.Fatalf("2d G[%d] is not exactly zero:\n%s", i, showExpr(comps[i]))
+		}
+	}
+	half, two := MustRational(1, 2), MustRational(2, 1)
+	negOne := MustRational(-1, 1)
+	f := Add(MustRational(1, 1), Pow(x, MustRational(2, 1)))
+	bigF := Pow(cloneExpr(f), MustRational(2, 1))
+	bigFi := Pow(cloneExpr(bigF), MustRational(-1, 1))
+	bigFi2 := Pow(cloneExpr(bigF), MustRational(-2, 1))
+	// Ricci blocks (same math as the contraction golden).
+	aInner := Add(Mul(two, two, cloneExpr(f)), Mul(x, x, two, two, two))
+	a := Mul(half, cloneExpr(aInner), cloneExpr(bigFi))
+	b := Mul(x, x, half, two, two, two, two, negOne, cloneExpr(f), cloneExpr(f), cloneExpr(bigFi2))
+	c := Mul(x, x, half, half, two, two, two, two, cloneExpr(f), cloneExpr(f), cloneExpr(bigFi), cloneExpr(bigFi))
+	q0 := Add(Neg(Add(cloneExpr(a), cloneExpr(b))), Neg(cloneExpr(c)))
+	nInner := Add(Mul(two, two, cloneExpr(f)), Mul(x, x, two, two, two))
+	n1 := Mul(half, Neg(cloneExpr(nInner)), cloneExpr(bigF), cloneExpr(bigFi))
+	n2 := Mul(x, half, two, two, cloneExpr(f), Neg(Mul(x, two, two, cloneExpr(f))), cloneExpr(bigFi))
+	n3 := Mul(x, half, two, two, negOne, cloneExpr(f), Neg(Mul(x, two, two, cloneExpr(f))), cloneExpr(bigF), cloneExpr(bigFi2))
+	v := Mul(x, half, half, two, two, cloneExpr(f), Neg(Mul(x, two, two, cloneExpr(f))), cloneExpr(bigF), cloneExpr(bigFi), cloneExpr(bigFi))
+	q3 := Add(n1, n2, n3, cloneExpr(v), Neg(cloneExpr(v)), Neg(cloneExpr(v)))
+	// Scalar blocks: R = g^xx R_xx + g^yy R_yy with adjugate-form inverses.
+	rForm := Add(Mul(Mul(cloneExpr(bigF), cloneExpr(bigFi)), cloneExpr(q0)), Mul(cloneExpr(bigFi), cloneExpr(q3)))
+	// G_xx = R_xx - (1/2) R . 1 with the unit diagonal stripped by arity.
+	// Point: x=0 -> -2+2 = 0; x=1 -> -1+1 = 0; x=2 -> -2/5+2/5 = 0.
+	want0, err := Canonicalize(Add(cloneExpr(q0), Neg(Mul(half, cloneExpr(rForm)))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Canonicalize(comps[0]); err != nil || !got.Equal(want0) {
+		t.Fatalf("2d G[0] is not the hand-derived form:\n%s", showExpr(comps[0]))
+	}
+	// G_yy = R_yy - (1/2) R F. Point: x=0 -> -2+2 = 0; x=1 -> -4+4 = 0.
+	want3, err := Canonicalize(Add(cloneExpr(n1), cloneExpr(n2), cloneExpr(n3),
+		cloneExpr(v), Neg(cloneExpr(v)), Neg(cloneExpr(v)),
+		Neg(Mul(half, cloneExpr(rForm), cloneExpr(bigF)))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Canonicalize(comps[3]); err != nil || !got.Equal(want3) {
+		t.Fatalf("2d G[3] is not the hand-derived form:\n%s", showExpr(comps[3]))
+	}
+	assertTraceReverseShape(t, s, result, chart, 2)
+	if err := CheckRiemannTraceReverse(s, recRef); err != nil {
+		t.Fatalf("2d trace-reverse rejected by Check: %v", err)
+	}
+	if err := ReplayRiemannTraceReverse(s, recRef); err != nil {
+		t.Fatalf("2d trace-reverse rejected by artifact replay: %v", err)
+	}
+}
+
+// assertTraceReverseShape verifies rank, dimension, chart, slot variance and
+// space of a trace-reversed result field.
+func assertTraceReverseShape(t *testing.T, s Store, resultField, chart artifact.ArtifactRef, dim int) {
+	t.Helper()
+	_, fpayload, err := s.Lookup(resultField)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rf, err := DecodeTensorField(fpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rf.CoordinateSystemRef != chart {
+		t.Fatal("trace-reverse result chart not preserved")
+	}
+	_, tpayload, err := s.Lookup(rf.TensorRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := DecodeTensor(tpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int(rt.Rank) != 2 || int(rt.Dimension) != dim || len(rt.ComponentRefs) != dim*dim {
+		t.Fatalf("trace-reverse result shape wrong: rank %d dim %d comps %d", rt.Rank, rt.Dimension, len(rt.ComponentRefs))
+	}
+	_, cpayload, err := s.Lookup(chart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs, err := DecodeCoordinateSystem(cpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.IndexRefs) != 2 {
+		t.Fatal("trace-reverse result index count wrong")
+	}
+	for i, r := range rt.IndexRefs {
+		idx, err := resolveIndex(s, "test slot", r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if idx.Variance != VarianceCovariant {
+			t.Fatalf("trace-reverse slot %d variance wrong", i)
+		}
+		if idx.Space == nil || *idx.Space != cs.SpaceRef {
+			t.Fatalf("trace-reverse slot %d space mismatch", i)
+		}
+	}
+}
+
+// TestRiemannTraceReverseThreeDim pins the decisive nonzero golden for
+// ds^2 = dx^2 + (1+x^2)^2 dy^2 + dz^2 with f = 1+x^2, F = f^2.
+// Hand derivation: z-index connection and curvature vanish by block-diagonal
+// decoupling, so the x-y block reproduces the 2D values while
+// G_zz = 0 - (1/2)(-4/f)(1) = 2/(1+x^2):
+// point x=0 -> 2, x=1 -> 1, x=2 -> 2/5. All other components vanish
+// (G_xx, G_yy by the 2D trace identity; off-diagonals exactly).
+func TestRiemannTraceReverseThreeDim(t *testing.T) {
+	s := NewMemStore()
+	chart, metric, fn, mapping, x, _, _, cond := prodSetup(t, s)
+	conds := []artifact.ArtifactRef{cond}
+	_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, conds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, crec, _, err := EvaluateRiemannContraction(s, riemRec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, srec, _, err := EvaluateRiemannScalar(s, crec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, recRef, _, err := EvaluateRiemannTraceReverse(s, crec, srec)
+	if err != nil {
+		t.Fatalf("3d trace-reverse failed: %v", err)
+	}
+	comps := traceReverseComps(t, s, result)
+	if len(comps) != 9 {
+		t.Fatalf("3d trace-reverse has %d components, want 9", len(comps))
+	}
+	// Flat position (mu,nu) = (2,2) is index 8: the G_zz slot.
+	if got := 2*3 + 2; got != 8 {
+		t.Fatalf("index ordering broken: (2,2) maps to %d, want 8", got)
+	}
+	zero := MustRational(0, 1)
+	for _, i := range []int{1, 2, 3, 5, 6, 7} {
+		if !comps[i].Equal(zero) {
+			t.Fatalf("3d G[%d] is not exactly zero:\n%s", i, showExpr(comps[i]))
+		}
+	}
+	half, two := MustRational(1, 2), MustRational(2, 1)
+	negOne := MustRational(-1, 1)
+	f := Add(MustRational(1, 1), Pow(x, MustRational(2, 1)))
+	bigF := Pow(cloneExpr(f), MustRational(2, 1))
+	bigFi := Pow(cloneExpr(bigF), MustRational(-1, 1))
+	bigFi2 := Pow(cloneExpr(bigF), MustRational(-2, 1))
+	// Ricci x-y blocks (same math as the 2D contraction golden).
+	aInner := Add(Mul(two, two, cloneExpr(f)), Mul(x, x, two, two, two))
+	a := Mul(half, cloneExpr(aInner), cloneExpr(bigFi))
+	b := Mul(x, x, half, two, two, two, two, negOne, cloneExpr(f), cloneExpr(f), cloneExpr(bigFi2))
+	c := Mul(x, x, half, half, two, two, two, two, cloneExpr(f), cloneExpr(f), cloneExpr(bigFi), cloneExpr(bigFi))
+	q0 := Add(Neg(Add(cloneExpr(a), cloneExpr(b))), Neg(cloneExpr(c)))
+	nInner := Add(Mul(two, two, cloneExpr(f)), Mul(x, x, two, two, two))
+	n1 := Mul(half, Neg(cloneExpr(nInner)), cloneExpr(bigF), cloneExpr(bigFi))
+	n2 := Mul(x, half, two, two, cloneExpr(f), Neg(Mul(x, two, two, cloneExpr(f))), cloneExpr(bigFi))
+	n3 := Mul(x, half, two, two, negOne, cloneExpr(f), Neg(Mul(x, two, two, cloneExpr(f))), cloneExpr(bigF), cloneExpr(bigFi2))
+	v := Mul(x, half, half, two, two, cloneExpr(f), Neg(Mul(x, two, two, cloneExpr(f))), cloneExpr(bigF), cloneExpr(bigFi), cloneExpr(bigFi))
+	q3 := Add(n1, n2, n3, cloneExpr(v), Neg(cloneExpr(v)), Neg(cloneExpr(v)))
+	// Scalar block: R = g^xx R_xx + g^yy R_yy with adjugate-form inverses.
+	rForm := Add(Mul(Mul(cloneExpr(bigF), cloneExpr(bigFi)), cloneExpr(q0)), Mul(cloneExpr(bigFi), cloneExpr(q3)))
+	// G_xx = R_xx - (1/2) R . 1 (unit diagonal stripped by arity).
+	// Point: x=0 -> -2+2 = 0; x=1 -> -1+1 = 0; x=2 -> -2/5+2/5 = 0.
+	want0, err := Canonicalize(Add(cloneExpr(q0), Neg(Mul(half, cloneExpr(rForm)))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Canonicalize(comps[0]); err != nil || !got.Equal(want0) {
+		t.Fatalf("3d G[0] is not the hand-derived form:\n%s", showExpr(comps[0]))
+	}
+	// G_yy = R_yy - (1/2) R F. Point: x=0 -> -2+2 = 0; x=1 -> -4+4 = 0.
+	want4, err := Canonicalize(Add(cloneExpr(n1), cloneExpr(n2), cloneExpr(n3),
+		cloneExpr(v), Neg(cloneExpr(v)), Neg(cloneExpr(v)),
+		Neg(Mul(half, cloneExpr(rForm), cloneExpr(bigF)))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Canonicalize(comps[4]); err != nil || !got.Equal(want4) {
+		t.Fatalf("3d G[4] is not the hand-derived form:\n%s", showExpr(comps[4]))
+	}
+	// G_zz = 0 - (1/2) R . 1 = 2/(1+x^2): the decisive nonzero component.
+	// Point: x=0 -> 2, x=1 -> 1, x=2 -> 2/5.
+	want8, err := Canonicalize(Neg(Mul(half, cloneExpr(rForm))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Canonicalize(comps[8]); err != nil || !got.Equal(want8) {
+		t.Fatalf("3d G[8] is not the hand-derived 2/(1+x^2) form:\n%s", showExpr(comps[8]))
+	}
+	if comps[8].Equal(zero) {
+		t.Fatal("3d G[8] collapsed to zero: nonzero golden lost")
+	}
+	assertTraceReverseShape(t, s, result, chart, 3)
+	if err := CheckRiemannTraceReverse(s, recRef); err != nil {
+		t.Fatalf("3d trace-reverse rejected by Check: %v", err)
+	}
+	if err := ReplayRiemannTraceReverse(s, recRef); err != nil {
+		t.Fatalf("3d trace-reverse rejected by artifact replay: %v", err)
+	}
+}
+
+// TestTraceReverseDecoupling proves block-diagonal decoupling byte-for-byte:
+// the 3D connection x-y block reproduces the 2D curved coefficients, every
+// z-index coefficient is exactly zero, and every z-containing Riemann
+// component is exactly zero.
+func TestTraceReverseDecoupling(t *testing.T) {
+	s := NewMemStore()
+	chart3, metric3, fn3, mapping3, _, _, _, cond3 := prodSetup(t, s)
+	conds3 := []artifact.ArtifactRef{cond3}
+	conn3, _, err := LeviCivita(s, metric3, chart3, mapping3, fn3, conds3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cpayload3, err := s.Lookup(conn3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc3, err := DecodeAffineConnection(cpayload3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chart2, metric2, fn2, mapping2, _, _, cond2 := curvedSetup(t, s)
+	conds2 := []artifact.ArtifactRef{cond2}
+	conn2, _, err := LeviCivita(s, metric2, chart2, mapping2, fn2, conds2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cpayload2, err := s.Lookup(conn2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc2, err := DecodeAffineConnection(cpayload2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// x-y block coefficients match the 2D run exactly; all z-index slots
+	// are exactly zero.
+	zero := MustRational(0, 1)
+	for rho := 0; rho < 3; rho++ {
+		for mu := 0; mu < 3; mu++ {
+			for nu := 0; nu < 3; nu++ {
+				got := mustResolve(t, s, cc3.CoefficientRefs[(rho*3+mu)*3+nu])
+				if rho < 2 && mu < 2 && nu < 2 {
+					want := mustResolve(t, s, cc2.CoefficientRefs[(rho*2+mu)*2+nu])
+					if !got.Equal(want) {
+						t.Fatalf("3d Gamma^%d_%d%d differs from 2D:\n%s", rho, mu, nu, showExpr(got))
+					}
+					continue
+				}
+				if !got.Equal(zero) {
+					t.Fatalf("3d Gamma^%d_%d%d is not exactly zero:\n%s", rho, mu, nu, showExpr(got))
+				}
+			}
+		}
+	}
+	// Every z-containing Riemann component is exactly zero.
+	res3, _, _, err := EvaluateRiemann(s, metric3, chart3, mapping3, fn3, conds3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rcomps := riemannComps(t, s, res3)
+	for _, i := range riemannZIndices(3) {
+		if got := rcomps[i]; !got.Equal(zero) {
+			rho, rem := i/27, i%27
+			sigma, rem := rem/9, rem%9
+			mu, nu := rem/3, rem%3
+			t.Fatalf("3d R[%d] (%d,%d,%d,%d) is not exactly zero:\n%s", i, rho, sigma, mu, nu, showExpr(got))
+		}
+	}
+}
+
+// riemannZIndices returns the flat indices of rank-4 components with at
+// least one slot equal to dim-1 (the decoupled direction).
+func riemannZIndices(dim int) []int {
+	var out []int
+	for rho := 0; rho < dim; rho++ {
+		for sigma := 0; sigma < dim; sigma++ {
+			for mu := 0; mu < dim; mu++ {
+				for nu := 0; nu < dim; nu++ {
+					if rho == dim-1 || sigma == dim-1 || mu == dim-1 || nu == dim-1 {
+						out = append(out, ((rho*dim+sigma)*dim+mu)*dim+nu)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// tamperTraceReverseRecord decodes a trace-reverse record, applies mutate,
+// and re-mints it as a new artifact.
+func tamperTraceReverseRecord(t *testing.T, s Store, ref artifact.ArtifactRef, mutate func(*RiemannTraceReverseEvaluation)) artifact.ArtifactRef {
+	t.Helper()
+	fam, payload, err := s.Lookup(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fam != FamilyRiemannTraceReverse {
+		t.Fatalf("record is %s/%s, not riemann_trace_reverse/1", fam.Namespace, fam.ArtifactType)
+	}
+	rec, err := DecodeRiemannTraceReverseEvaluation(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(&rec)
+	raw, err := rec.Encode()
+	if err != nil {
+		t.Fatalf("tampered record does not encode: %v", err)
+	}
+	bad, err := s.Put(FamilyRiemannTraceReverse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bad
+}
+
+// traceReverseFixture builds the 2D curved chain through the scalar stage.
+func traceReverseFixture(t *testing.T, s Store) (cf, sf artifact.ArtifactRef, crec RiemannContractionEvaluation, srec RiemannScalarEvaluation) {
+	t.Helper()
+	chart, metric, fn, mapping, _, _, cond := curvedSetup(t, s)
+	conds := []artifact.ArtifactRef{cond}
+	_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, conds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, crecRef, _, err := EvaluateRiemannContraction(s, riemRec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, srecRef, _, err := EvaluateRiemannScalar(s, crecRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return crecRef, srecRef, riemannContractionRecord(t, s, crecRef), scalarRecord(t, s, srecRef)
+}
+
+// TestRiemannTraceReverseAdversarial proves corrupted trace-reversed evidence
+// fails Check and artifact Replay at the intended boundary.
+func TestRiemannTraceReverseAdversarial(t *testing.T) {
+	mk := func(t *testing.T) (*MemStore, artifact.ArtifactRef, RiemannTraceReverseEvaluation) {
+		s := NewMemStore()
+		cf, sf, _, _ := traceReverseFixture(t, s)
+		res, recRef, _, err := EvaluateRiemannTraceReverse(s, cf, sf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res
+		return s, recRef, traceReverseRecord(t, s, recRef)
+	}
+	bothFail := func(t *testing.T, s *MemStore, bad artifact.ArtifactRef, reason string) {
+		t.Helper()
+		if err := CheckRiemannTraceReverse(s, bad); err == nil {
+			t.Fatal("corrupted record accepted by Check")
+		} else if !strings.Contains(err.Error(), reason) {
+			t.Fatalf("Check wrong boundary (want %q): %v", reason, err)
+		}
+		if err := ReplayRiemannTraceReverse(s, bad); err == nil {
+			t.Fatal("corrupted record accepted by artifact replay")
+		} else if !strings.Contains(err.Error(), reason) {
+			t.Fatalf("replay wrong boundary (want %q): %v", reason, err)
+		}
+	}
+
+	t.Run("mismatched-scalar-pair", func(t *testing.T) {
+		s, recRef, rec := mk(t)
+		// A second scalar chain over another metric in the same store.
+		one := mustStoreExpr(t, s, MustRational(1, 1))
+		zero := mustStoreExpr(t, s, MustRational(0, 1))
+		flat, err := s.Put(FamilySymmetricBilinear, SymmetricBilinear{
+			Dimension: 2, ComponentRefs: []artifact.ArtifactRef{one, zero, zero, one},
+		}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		flatDet, _, err := GeneralDeterminant(s, flat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		flatCond := detCond(t, s, flatDet)
+		_, fpayload, err := s.Lookup(rec.ChartRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = fpayload
+		chart, metric, fn, mapping, _, _, _ := polarSetup(t, s)
+		_ = chart
+		_ = metric
+		_ = fn
+		_ = mapping
+		// Build an independent flat-metric chain on the polar chart.
+		pchart, _, pfn, pmap, _, _, _ := polarSetup(t, s)
+		_ = pchart
+		_ = pfn
+		_ = pmap
+		_, flatRiem, _, err := EvaluateRiemann(s, flat, pchart, pmap, pfn, []artifact.ArtifactRef{flatCond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, flatCont, _, err := EvaluateRiemannContraction(s, flatRiem)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, flatScalar, _, err := EvaluateRiemannScalar(s, flatCont)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Scalar bound to another contraction: pair linkage rejects it.
+		bad := tamperTraceReverseRecord(t, s, recRef, func(r *RiemannTraceReverseEvaluation) {
+			r.ScalarRef = flatScalar
+		})
+		bothFail(t, s, bad, "another contraction")
+	})
+
+	t.Run("substituted-sources", func(t *testing.T) {
+		s, recRef, rec := mk(t)
+		ghostCont := ComputeTestRef(t, "physmath", "riemann_contraction/1")
+		bad := tamperTraceReverseRecord(t, s, recRef, func(r *RiemannTraceReverseEvaluation) { r.ContractionRef = ghostCont })
+		bothFail(t, s, bad, "unresolvable")
+		one := mustStoreExpr(t, s, MustRational(1, 1))
+		zero := mustStoreExpr(t, s, MustRational(0, 1))
+		flat, err := s.Put(FamilySymmetricBilinear, SymmetricBilinear{
+			Dimension: 2, ComponentRefs: []artifact.ArtifactRef{one, zero, zero, one},
+		}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		badMetric := tamperTraceReverseRecord(t, s, recRef, func(r *RiemannTraceReverseEvaluation) { r.MetricRef = flat })
+		bothFail(t, s, badMetric, "differs from")
+		_ = rec
+		ghostChart := ComputeTestRef(t, "physmath", "coordinate_system/1")
+		badChart := tamperTraceReverseRecord(t, s, recRef, func(r *RiemannTraceReverseEvaluation) { r.ChartRef = ghostChart })
+		bothFail(t, s, badChart, "unresolvable")
+	})
+
+	t.Run("reordered-components-wrong-slots", func(t *testing.T) {
+		s, recRef, rec := mk(t)
+		_, fpayload, err := s.Lookup(rec.ResultRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rf, err := DecodeTensorField(fpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, tpayload, err := s.Lookup(rf.TensorRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rt, err := DecodeTensor(tpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Swap two component references: reordered result evidence.
+		swapped := append([]artifact.ArtifactRef{}, rt.ComponentRefs...)
+		swapped[0], swapped[3] = swapped[3], swapped[0]
+		badTensor, err := s.Put(FamilyTensor, Tensor{Rank: 2, Dimension: 2, IndexRefs: rt.IndexRefs, ComponentRefs: swapped}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		badField, err := s.Put(FamilyTensorField, TensorField{TensorRef: badTensor, CoordinateSystemRef: rf.CoordinateSystemRef}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := tamperTraceReverseRecord(t, s, recRef, func(r *RiemannTraceReverseEvaluation) { r.ResultRef = badField })
+		bothFail(t, s, bad, "mismatch")
+		// Wrong slot variance: contravariant first slot.
+		_, cpayload, err := s.Lookup(rec.ChartRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cs, err := DecodeCoordinateSystem(cpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		upPayload, err := Index{Label: "rt0", Variance: VarianceContravariant, Space: &cs.SpaceRef}.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		upRef, err := s.Put(FamilyIndex, upPayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wrongIdx := []artifact.ArtifactRef{upRef, rt.IndexRefs[1]}
+		wrongTensor, err := s.Put(FamilyTensor, Tensor{Rank: 2, Dimension: 2, IndexRefs: wrongIdx, ComponentRefs: rt.ComponentRefs}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		wrongField, err := s.Put(FamilyTensorField, TensorField{TensorRef: wrongTensor, CoordinateSystemRef: rf.CoordinateSystemRef}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		badSlots := tamperTraceReverseRecord(t, s, recRef, func(r *RiemannTraceReverseEvaluation) { r.ResultRef = wrongField })
+		bothFail(t, s, badSlots, "identity broken")
+	})
+
+	t.Run("tampered-step-ghost-codec-dim", func(t *testing.T) {
+		s, recRef, rec := mk(t)
+		_, dpayload, err := s.Lookup(rec.DerivationRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := DecodeDerivation(dpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		other := mustStoreExpr(t, s, MustRational(77, 1))
+		d.Steps[len(d.Steps)-1].OutputRef = other
+		draw, err := d.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		altDeriv, err := s.Put(FamilyDerivation, draw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := tamperTraceReverseRecord(t, s, recRef, func(r *RiemannTraceReverseEvaluation) { r.DerivationRef = altDeriv })
+		bothFail(t, s, bad, "output mismatch")
+		exprRef := mustStoreExpr(t, s, MustRational(1, 1))
+		if err := CheckRiemannTraceReverse(s, exprRef); err == nil {
+			t.Fatal("expression target accepted as trace-reverse record")
+		}
+		if err := ReplayRiemannTraceReverse(s, exprRef); err == nil {
+			t.Fatal("expression target replayed as trace-reverse record")
+		}
+		ghost := ComputeTestRef(t, "physmath", "riemann_trace_reverse/1")
+		if err := CheckRiemannTraceReverse(s, ghost); err == nil {
+			t.Fatal("unresolvable record accepted")
+		}
+		raw, err := rec.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DecodeRiemannTraceReverseEvaluation(raw); err != nil {
+			t.Fatalf("record does not round-trip: %v", err)
+		}
+		if _, err := DecodeRiemannTraceReverseEvaluation(raw[:len(raw)/2]); err == nil {
+			t.Fatal("truncated record accepted")
+		}
+		if _, err := DecodeRiemannTraceReverseEvaluation(append(append([]byte{}, raw...), 0x00)); err == nil {
+			t.Fatal("trailing bytes accepted")
+		}
+	})
+
+	t.Run("dim-mismatch-3d-scalar", func(t *testing.T) {
+		s, recRef, _ := mk(t)
+		// A 3D scalar record cannot back this 2D result: substitute its
+		// reference and require rejection at the dimension boundary.
+		s3 := NewMemStore()
+		c3, m3, f3, mp3, _, _, _, cd3 := prodSetup(t, s3)
+		_, rr3, _, err := EvaluateRiemann(s3, m3, c3, mp3, f3, []artifact.ArtifactRef{cd3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, cr3, _, err := EvaluateRiemannContraction(s3, rr3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, sc3, _, err := EvaluateRiemannScalar(s3, cr3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, sp, err := s3.Lookup(sc3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scCopy, err := s.Put(FamilyRiemannScalar, sp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := tamperTraceReverseRecord(t, s, recRef, func(r *RiemannTraceReverseEvaluation) { r.ScalarRef = scCopy })
+		// Dependencies of the foreign record do not resolve here.
+		if err := CheckRiemannTraceReverse(s, bad); err == nil {
+			t.Fatal("foreign-dimension scalar accepted")
+		}
+		if err := ReplayRiemannTraceReverse(s, bad); err == nil {
+			t.Fatal("foreign-dimension scalar replayed")
+		}
+	})
+}
+
+// traceReverseRecord resolves a riemann_trace_reverse/1 record.
+func traceReverseRecord(t *testing.T, s Store, ref artifact.ArtifactRef) RiemannTraceReverseEvaluation {
+	t.Helper()
+	fam, payload, err := s.Lookup(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fam != FamilyRiemannTraceReverse {
+		t.Fatalf("record is %s/%s, not riemann_trace_reverse/1", fam.Namespace, fam.ArtifactType)
+	}
+	rec, err := DecodeRiemannTraceReverseEvaluation(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec
+}
