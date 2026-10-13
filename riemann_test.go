@@ -2,6 +2,7 @@ package physmath
 
 import (
 	"errors"
+	"math/big"
 	"strings"
 	"testing"
 
@@ -2590,4 +2591,1142 @@ func traceReverseRecord(t *testing.T, s Store, ref artifact.ArtifactRef) Riemann
 		t.Fatal(err)
 	}
 	return rec
+}
+
+// warpedSetup builds the nontrivial warped 3D chart (x,y,z) with metric
+// diag(1,f^2,f^2), f = 1+x^2, plus mapping, declaring function, and
+// determinant condition. Unlike the block-diagonal product metric, the y-z
+// plane carries genuine warping curvature (R^y_zyz != 0), so the divergence
+// cancellation is nontrivial.
+func warpedSetup(t *testing.T, s Store) (chart, metric, fn artifact.ArtifactRef, mapping CoordParamMap, x, y, z Expr, cond artifact.ArtifactRef) {
+	t.Helper()
+	px := DeriveParameterID(0)
+	py := DeriveParameterID(1)
+	pz := DeriveParameterID(2)
+	x = NewBoundSymbol("x", px)
+	y = NewBoundSymbol("y", py)
+	z = NewBoundSymbol("z", pz)
+	desig := mustStoreExpr(t, s, NewEphemeralSymbol("warped_space"))
+	spaceRaw, err := Collection{ElementRefs: []artifact.ArtifactRef{desig}}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	space, err := s.Put(FamilyCollection, spaceRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := CoordinateSystem{Dimension: 3, CoordinateRefs: []artifact.ArtifactRef{
+		mustStoreExpr(t, s, x), mustStoreExpr(t, s, y), mustStoreExpr(t, s, z),
+	}, SpaceRef: space}
+	if err := cs.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	chart, err = s.Put(FamilyCoordinateSystem, cs.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := mustStoreExpr(t, s, MustRational(1, 1))
+	zero := mustStoreExpr(t, s, MustRational(0, 1))
+	f := Add(MustRational(1, 1), Pow(x, MustRational(2, 1)))
+	gyy := mustStoreExpr(t, s, Pow(f, MustRational(2, 1)))
+	m := SymmetricBilinear{Dimension: 3, ComponentRefs: []artifact.ArtifactRef{
+		one, zero, zero,
+		zero, gyy, zero,
+		zero, zero, gyy,
+	}}
+	if err := m.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	metric, err = s.Put(FamilySymmetricBilinear, m.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fnObj := Function{ParameterIDs: []ParameterID{px, py, pz},
+		ParamNames: []string{"x", "y", "z"},
+		BodyRef:    mustStoreExpr(t, s, x)}
+	fnBytes, err := fnObj.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn, err = s.Put(FamilyFunction, fnBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping = CoordParamMap{Entries: []BoundParameterRef{
+		{DeclaringArtifactRef: fn, ParameterID: px},
+		{DeclaringArtifactRef: fn, ParameterID: py},
+		{DeclaringArtifactRef: fn, ParameterID: pz},
+	}}
+	detRef, _, err := GeneralDeterminant(s, metric)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cond = detCond(t, s, detRef)
+	return chart, metric, fn, mapping, x, y, z, cond
+}
+
+func TestDivergenceWarped(t *testing.T) {
+	s := NewMemStore()
+	chart, metric, fn, mapping, x, _, _, cond := warpedSetup(t, s)
+	px := DeriveParameterID(0)
+	conds := []artifact.ArtifactRef{cond}
+	_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, conds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, crec, _, err := EvaluateRiemannContraction(s, riemRec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, srec, _, err := EvaluateRiemannScalar(s, crec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, trec, _, err := EvaluateRiemannTraceReverse(s, crec, srec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, recRef, _, err := EvaluateRiemannTraceReverseDivergence(s, trec)
+	if err != nil {
+		t.Fatalf("warped divergence failed: %v", err)
+	}
+	comps := divergenceComps(t, s, result)
+	if len(comps) != 3 {
+		t.Fatalf("warped divergence has %d components, want 3", len(comps))
+	}
+	zero := MustRational(0, 1)
+	// y/z routes vanish: every route carries a zero partial, a zero
+	// connection coefficient, or an exact-zero inverse factor.
+	for _, i := range []int{1, 2} {
+		if !comps[i].Equal(zero) {
+			t.Fatalf("warped D[%d] is not exactly zero:\n%s", i, showExpr(comps[i]))
+		}
+	}
+	rec := divergenceRecord(t, s, recRef)
+	// Small byte pins (connection, inverse diagonal, determinant) plus
+	// mirror-slot sharing and exact-zero gates. Values below are
+	// machine-checked in pinWarpedValues.
+	pinWarpedAtoms(t, s, rec, x, px)
+	// W[0]: Add of exactly three diagonal Mul pairings (off-diagonal inverse
+	// factors are exact zeros and strip). Canon sorts children, so pairings
+	// are matched by content multiset, never position.
+	if comps[0].Kind != TagAdd || len(comps[0].Children) != 3 {
+		t.Fatalf("warped D[0] is not a three-term sum:\n%s", showExpr(comps[0]))
+	}
+	invComps := tensorComps(t, s, rec.InvTensorRef)
+	hessComps := tensorComps(t, s, mustTensorOf(t, s, rec.CovariantResultRef))
+	assertPairMultiset(t, "warped D[0] pairing", comps[0].Children,
+		[][2]Expr{{invComps[0], hessComps[0]}, {invComps[4], hessComps[12]}, {invComps[8], hessComps[24]}})
+	// Nontrivial intermediates: routes and the source G_xx are genuine
+	// nonzero forms (rules out a constant-zero pipeline).
+	for _, k := range []int{0, 12, 24} {
+		if hessComps[k].Equal(zero) {
+			t.Fatalf("warped H-route %d is literal zero: nontrivial computation lost", k)
+		}
+	}
+	gComps := tensorComps(t, s, mustTensorOf(t, s, mustFieldTensor(t, s, trec)))
+	if gComps[0].Equal(zero) {
+		t.Fatal("warped G_xx input is literal zero: golden vacuous")
+	}
+	// Machine-checked values for every hand-arithmetic input (see the table
+	// in pinWarpedValues): connection, Ricci, inverse, determinant, scalar,
+	// trace-reverse, routes, and the divergence itself.
+	pinWarpedValues(t, s, rec, trec, px)
+	// Independent task-formula recomputation: dG_xx/dx via the guarded
+	// API on the recorded G_xx plus hand-built 2(f'/f)G_xx - 2(f'/f^3)G_yy
+	// terms, assembled and normalized through the same rule pipeline. The
+	// formula comes from the task statement, not the implementation; only
+	// resolved recorded references enter as operands.
+	taskRecomputeX(t, s, rec, trec, x)
+	// Machine-checked zero at x=0: substitution + canon + simplify closes
+	// the factored sum to literal zero through sound rules only.
+	if got := substituteZero(t, s, comps[0], fn); !got.Equal(zero) {
+		t.Fatalf("warped D[0] at x=0 is not zero:\n%s", showExpr(got))
+	}
+	// Assembly wiring: the nu=0 premise carries 9 products in (lambda,mu)
+	// order with exact inverse/covariant operand references.
+	assertDivergenceWiring(t, s, recRef, 0, invComps, hessComps)
+	if err := CheckRiemannTraceReverseDivergence(s, recRef); err != nil {
+		t.Fatalf("warped divergence rejected by Check: %v", err)
+	}
+	if err := ReplayRiemannTraceReverseDivergence(s, recRef); err != nil {
+		t.Fatalf("warped divergence rejected by artifact replay: %v", err)
+	}
+}
+
+// divergenceComps resolves the ordered divergence components.
+func divergenceComps(t *testing.T, s Store, resultField artifact.ArtifactRef) []Expr {
+	t.Helper()
+	return tensorComps(t, s, mustTensorOf(t, s, resultField))
+}
+
+// tensorComps resolves ordered tensor components.
+func tensorComps(t *testing.T, s Store, tensorRef artifact.ArtifactRef) []Expr {
+	t.Helper()
+	_, tpayload, err := s.Lookup(tensorRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tn, err := DecodeTensor(tpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]Expr, len(tn.ComponentRefs))
+	for i, r := range tn.ComponentRefs {
+		out[i] = mustResolve(t, s, r)
+	}
+	return out
+}
+
+// mustTensorOf resolves a tensor field to its tensor reference.
+func mustTensorOf(t *testing.T, s Store, fieldRef artifact.ArtifactRef) artifact.ArtifactRef {
+	t.Helper()
+	_, fpayload, err := s.Lookup(fieldRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tf, err := DecodeTensorField(fpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tf.TensorRef
+}
+
+// mustFieldTensor resolves a trace-reverse record's result field.
+func mustFieldTensor(t *testing.T, s Store, trecRef artifact.ArtifactRef) artifact.ArtifactRef {
+	t.Helper()
+	fam, payload, err := s.Lookup(trecRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fam != FamilyRiemannTraceReverse {
+		t.Fatalf("not a trace-reverse record: %s/%s", fam.Namespace, fam.ArtifactType)
+	}
+	rec, err := DecodeRiemannTraceReverseEvaluation(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec.ResultRef
+}
+
+// mustCompRef resolves one trace-reverse result component reference.
+func mustCompRef(t *testing.T, s Store, trecRef artifact.ArtifactRef, idx int) artifact.ArtifactRef {
+	t.Helper()
+	_, fpayload, err := s.Lookup(mustFieldTensor(t, s, trecRef))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tf, err := DecodeTensorField(fpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, tpayload, err := s.Lookup(tf.TensorRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tn, err := DecodeTensor(tpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tn.ComponentRefs[idx]
+}
+
+// substituteZero substitutes x := 0 into an expression and simplifies: the
+// machine-checked point evaluation used where factored forms cannot close
+// by canonicalization alone.
+func substituteZero(t *testing.T, s Store, e Expr, fn artifact.ArtifactRef) Expr {
+	t.Helper()
+	target := mustStoreExpr(t, s, e)
+	zeroRef := mustStoreExpr(t, s, MustRational(0, 1))
+	return substituteZeroVia(t, s, target, fn, zeroRef)
+}
+
+func substituteZeroVia(t *testing.T, s Store, target, fn, zeroRef artifact.ArtifactRef) Expr {
+	t.Helper()
+	entry := append(BoundParameterRef{fn, DeriveParameterID(0)}.Encode(), zeroRef.Encode()...)
+	params := append(artifact.EncodeUInt32(1), entry...)
+	sub, err := Apply(s, Invocation{ProducerNamespace: NamespacePhysMath,
+		RuleID: RuleExprSubstitute, InputRefs: []artifact.ArtifactRef{target, fn}, Parameters: params})
+	if err != nil {
+		t.Fatalf("substitute: %v", err)
+	}
+	canon, err := Apply(s, Invocation{ProducerNamespace: NamespacePhysMath,
+		RuleID: RuleExprCanon, InputRefs: []artifact.ArtifactRef{sub.OutputRef}})
+	if err != nil {
+		t.Fatalf("canon: %v", err)
+	}
+	simp, err := Apply(s, Invocation{ProducerNamespace: NamespacePhysMath,
+		RuleID: RuleExprSimplify, InputRefs: []artifact.ArtifactRef{canon.OutputRef}})
+	if err != nil {
+		t.Fatalf("simplify: %v", err)
+	}
+	return mustResolve(t, s, simp.OutputRef)
+}
+
+// assertDivergenceWiring verifies the nu-th assembly premise carries 9
+// products in (lambda,mu) order with exact inverse/covariant operand refs.
+func assertDivergenceWiring(t *testing.T, s Store, recRef artifact.ArtifactRef, nu int, invComps, hessComps []Expr) {
+	t.Helper()
+	rec := divergenceRecord(t, s, recRef)
+	_, dpayload, err := s.Lookup(rec.DerivationRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := DecodeDerivation(dpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Assembly pairs are the final 2*dim steps in nu order.
+	dim := 3
+	if len(d.Steps) < 2*dim {
+		t.Fatal("derivation too short for assembly pairs")
+	}
+	base := len(d.Steps) - 2*dim + 2*nu
+	canonStep := d.Steps[base]
+	if canonStep.RuleID != RuleExprCanon || len(canonStep.InputRefs) != 1 {
+		t.Fatalf("nu=%d assembly canon step malformed", nu)
+	}
+	premise := mustResolve(t, s, canonStep.InputRefs[0])
+	if premise.Kind != TagAdd || len(premise.Children) != dim*dim {
+		t.Fatalf("nu=%d premise has %d children, want %d", nu, len(premise.Children), dim*dim)
+	}
+	k := 0
+	for lam := 0; lam < dim; lam++ {
+		for mu := 0; mu < dim; mu++ {
+			term := premise.Children[k]
+			k++
+			if term.Kind != TagMul || len(term.Children) != 2 {
+				t.Fatalf("nu=%d term (%d,%d) is not a binary product", nu, lam, mu)
+			}
+			gotG, err := term.Children[0].Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantG, err := invComps[lam*dim+mu].Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(gotG) != string(wantG) {
+				t.Fatalf("nu=%d term (%d,%d) pairs the wrong inverse component", nu, lam, mu)
+			}
+			gotH, err := term.Children[1].Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantH, err := hessComps[(lam*dim+mu)*dim+nu].Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(gotH) != string(wantH) {
+				t.Fatalf("nu=%d term (%d,%d) pairs the wrong derivative route", nu, lam, mu)
+			}
+		}
+	}
+}
+
+// divergenceRecord resolves a divergence record for inspection.
+func divergenceRecord(t *testing.T, s Store, ref artifact.ArtifactRef) RiemannTraceReverseDivergenceEvaluation {
+	t.Helper()
+	fam, payload, err := s.Lookup(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fam != FamilyRiemannTraceReverseDivergence {
+		t.Fatalf("record is %s/%s, not divergence", fam.Namespace, fam.ArtifactType)
+	}
+	rec, err := DecodeRiemannTraceReverseDivergenceEvaluation(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec
+}
+
+// evalAtRational evaluates a closed single-variable expression at an integer
+// point using exact big-rational arithmetic. It substitutes the target PID,
+// folds Add/Mul/Neg exactly, and evaluates integer-exponent powers (negative
+// via reciprocal, failing closed on zero base or zero denominator). Unknown
+// symbols and non-executable nodes fail closed: a supplemental oracle per
+// Lesson 2, never a replacement for structural and provenance tests.
+func evalAtRational(t *testing.T, e Expr, pid ParameterID, value int64) *big.Rat {
+	t.Helper()
+	v := big.NewRat(value, 1)
+	var walk func(x Expr) *big.Rat
+	walk = func(x Expr) *big.Rat {
+		switch x.Kind {
+		case TagRational:
+			return new(big.Rat).SetFrac(x.Numerator.ToBig(), x.Denominator.ToBig())
+		case TagSymbol:
+			if x.ParamID == nil || *x.ParamID != pid {
+				t.Fatalf("eval oracle hit foreign symbol %q", x.DisplayName)
+			}
+			return new(big.Rat).Set(v)
+		case TagAdd:
+			acc := new(big.Rat)
+			for _, c := range x.Children {
+				acc.Add(acc, walk(c))
+			}
+			return acc
+		case TagMul:
+			acc := big.NewRat(1, 1)
+			for _, c := range x.Children {
+				acc.Mul(acc, walk(c))
+			}
+			return acc
+		case TagNeg:
+			return new(big.Rat).Neg(walk(*x.Operand))
+		case TagPow:
+			base, exp := walk(*x.Base), walk(*x.Exp)
+			if !exp.IsInt() {
+				t.Fatalf("eval oracle hit non-integer exponent %v", exp)
+			}
+			n := exp.Num().Int64()
+			if n < 0 && base.Sign() == 0 {
+				t.Fatalf("eval oracle hit zero base with negative exponent")
+			}
+			pow := func(z *big.Int, m int64) *big.Int {
+				if m < 0 {
+					m = -m
+				}
+				return new(big.Int).Exp(z, big.NewInt(m), nil)
+			}
+			numPow, denPow := pow(base.Num(), n), pow(base.Denom(), n)
+			if n >= 0 {
+				return new(big.Rat).SetFrac(numPow, denPow)
+			}
+			return new(big.Rat).SetFrac(denPow, numPow)
+		default:
+			t.Fatalf("eval oracle hit unsupported node kind %d", x.Kind)
+			return nil
+		}
+	}
+	return walk(e)
+}
+
+// assertEvalValue requires an expression to evaluate to want at x=value.
+func assertEvalValue(t *testing.T, e Expr, pid ParameterID, x, num, den int64) {
+	t.Helper()
+	got := evalAtRational(t, e, pid, x)
+	want := big.NewRat(num, den)
+	if got.Cmp(want) != 0 {
+		t.Fatalf("eval at x=%d: got %v, want %v", x, got, want)
+	}
+}
+
+// pinWarpedAtoms pins small byte-exact forms (connection, inverse diagonal,
+// determinant) and byte-identical mirror slots. Larger forms are verified by
+// value (pinWarpedValues), structure, wiring, and recomputation instead.
+func pinWarpedAtoms(t *testing.T, s Store, rec RiemannTraceReverseDivergenceEvaluation, x Expr, px ParameterID) {
+	t.Helper()
+	half, two := MustRational(1, 2), MustRational(2, 1)
+	f := Add(MustRational(1, 1), Pow(x, MustRational(2, 1)))
+	bigF := Pow(cloneExpr(f), MustRational(2, 1))
+	twoX := Mul(x, two)
+	// Gamma^x_yy = (1/2)(-(2(2x)f)) F F (F F)^-1. Point: 0, -4, -20.
+	gxxy, err := Canonicalize(Mul(half, Neg(Mul(two, cloneExpr(twoX), cloneExpr(f))), cloneExpr(bigF), cloneExpr(bigF), Pow(Mul(cloneExpr(bigF), cloneExpr(bigF)), MustRational(-1, 1))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Gamma^y_xy = (1/2)(2 f 2x) F (F F)^-1. Point: 0, 1, 4/5.
+	gyxy, err := Canonicalize(Mul(half, Mul(two, cloneExpr(f), cloneExpr(twoX)), cloneExpr(bigF), Pow(Mul(cloneExpr(bigF), cloneExpr(bigF)), MustRational(-1, 1))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, connP, err := s.Lookup(rec.ConnectionRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc, err := DecodeAffineConnection(connP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Canonicalize(mustResolve(t, s, cc.CoefficientRefs[4])); err != nil || !got.Equal(gxxy) {
+		t.Fatalf("warped Gamma^x_yy mismatch:\n%s", showExpr(mustResolve(t, s, cc.CoefficientRefs[4])))
+	}
+	if got, err := Canonicalize(mustResolve(t, s, cc.CoefficientRefs[10])); err != nil || !got.Equal(gyxy) {
+		t.Fatalf("warped Gamma^y_xy mismatch:\n%s", showExpr(mustResolve(t, s, cc.CoefficientRefs[10])))
+	}
+	// Mirror slots share byte-identical references (x-only content makes
+	// y<->z symmetric pairs coincide, not merely agree in value).
+	for _, pair := range [][2]int{{12, 10}, {24, 20}, {8, 4}} {
+		if cc.CoefficientRefs[pair[0]] != cc.CoefficientRefs[pair[1]] {
+			t.Fatalf("warped Gamma slots %d and %d do not share bytes", pair[0], pair[1])
+		}
+	}
+	// Gamma^. _xx slots are exactly zero (used by the hand arithmetic).
+	zero := MustRational(0, 1)
+	for _, k := range []int{0, 3, 6} {
+		if got := mustResolve(t, s, cc.CoefficientRefs[k]); !got.Equal(zero) {
+			t.Fatalf("warped Gamma slot %d is not exactly zero:\n%s", k, showExpr(got))
+		}
+	}
+	// Inverse diagonal pins: g^xx = F.(F F)^-1 (value 1), g^yy = F.(F F)^-1
+	// with the cofactor form (value 1/f^2). Off-diagonals are exactly zero.
+	_, ginvP, err := s.Lookup(rec.InvTensorRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ginv, err := DecodeTensor(ginvP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Adjugate forms with the 3D determinant: g^xx = F.F.(F.F)^-1 (value
+	// 1 wherever defined), g^yy = F.(F.F)^-1 (value 1/f^2).
+	detForm := Mul(cloneExpr(bigF), cloneExpr(bigF))
+	detInv := Pow(cloneExpr(detForm), MustRational(-1, 1))
+	gxxWant, err := Canonicalize(Mul(cloneExpr(detForm), cloneExpr(detInv)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Canonicalize(mustResolve(t, s, ginv.ComponentRefs[0])); err != nil || !got.Equal(gxxWant) {
+		t.Fatalf("warped g^xx mismatch:\n%s", showExpr(mustResolve(t, s, ginv.ComponentRefs[0])))
+	}
+	gyyWant, err := Canonicalize(Mul(cloneExpr(bigF), cloneExpr(detInv)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Canonicalize(mustResolve(t, s, ginv.ComponentRefs[4])); err != nil || !got.Equal(gyyWant) {
+		t.Fatalf("warped g^yy mismatch:\n%s", showExpr(mustResolve(t, s, ginv.ComponentRefs[4])))
+	}
+	if got, err := Canonicalize(mustResolve(t, s, ginv.ComponentRefs[8])); err != nil || !got.Equal(gyyWant) {
+		t.Fatalf("warped g^zz mismatch:\n%s", showExpr(mustResolve(t, s, ginv.ComponentRefs[8])))
+	}
+	for _, k := range []int{1, 2, 3, 5, 6, 7} {
+		if got := mustResolve(t, s, ginv.ComponentRefs[k]); !got.Equal(zero) {
+			t.Fatalf("warped inverse [%d] is not exactly zero:\n%s", k, showExpr(got))
+		}
+	}
+}
+
+// pinWarpedValues asserts machine-checked exact values at x = 0, 1, 2 for
+// every quantity entering the hand arithmetic, via the independent rational
+// oracle. Hand values: f 1,2,5; Gamma^x_yy 0,-4,-20; Gamma^y_xy 0,1,4/5;
+// R_xx -4,-2,-4/5; R_yy -2,-8,-26; det 1,16,625; g^xx 1,1,1; g^yy 1,1/4,1/25;
+// R -8,-6,-72/25; G_xx 0,1,16/25; G_yy 2,4,10; H_xx 0,0,-48/125;
+// H_yy 0,0,24/5; W 0,0,0.
+func pinWarpedValues(t *testing.T, s Store, rec RiemannTraceReverseDivergenceEvaluation, trecRef artifact.ArtifactRef, px ParameterID) {
+	t.Helper()
+	trec := traceReverseRecord(t, s, trecRef)
+	crec := riemannContractionRecord(t, s, trec.ContractionRef)
+	srec := scalarRecord(t, s, trec.ScalarRef)
+	val := func(e Expr, x, num, den int64) {
+		t.Helper()
+		assertEvalValue(t, e, px, x, num, den)
+	}
+	// Connection values from the recorded connection.
+	_, connP, err := s.Lookup(rec.ConnectionRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc, err := DecodeAffineConnection(connP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gxxy := mustResolve(t, s, cc.CoefficientRefs[4])
+	gyxy := mustResolve(t, s, cc.CoefficientRefs[10])
+	for _, x := range []int64{0, 1, 2} {
+		_ = x
+	}
+	val(gxxy, 0, 0, 1)
+	val(gxxy, 1, -4, 1)
+	val(gxxy, 2, -20, 1)
+	val(gyxy, 0, 0, 1)
+	val(gyxy, 1, 1, 1)
+	val(gyxy, 2, 4, 5)
+	// Ricci values from the recorded contraction result.
+	_, cfp, err := s.Lookup(crec.ResultRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctf, err := DecodeTensorField(cfp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ctp, err := s.Lookup(ctf.TensorRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctn, err := DecodeTensor(ctp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rxx := mustResolve(t, s, ctn.ComponentRefs[0])
+	ryy := mustResolve(t, s, ctn.ComponentRefs[4])
+	rzz := mustResolve(t, s, ctn.ComponentRefs[8])
+	if ctn.ComponentRefs[8] != ctn.ComponentRefs[4] {
+		t.Fatal("warped R_zz does not share R_yy bytes")
+	}
+	val(rxx, 0, -4, 1)
+	val(rxx, 1, -2, 1)
+	val(rxx, 2, -4, 5)
+	val(ryy, 0, -2, 1)
+	val(ryy, 1, -8, 1)
+	val(ryy, 2, -26, 1)
+	val(rzz, 0, -2, 1)
+	val(rzz, 1, -8, 1)
+	val(rzz, 2, -26, 1)
+	// Inverse + determinant values.
+	_, ginvP, err := s.Lookup(rec.InvTensorRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ginv, err := DecodeTensor(ginvP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gxx := mustResolve(t, s, ginv.ComponentRefs[0])
+	gyy := mustResolve(t, s, ginv.ComponentRefs[4])
+	val(gxx, 0, 1, 1)
+	val(gxx, 1, 1, 1)
+	val(gxx, 2, 1, 1)
+	val(gyy, 0, 1, 1)
+	val(gyy, 1, 1, 4)
+	val(gyy, 2, 1, 25)
+	// Scalar value.
+	scalar := mustResolve(t, s, srec.ResultRef)
+	val(scalar, 0, -8, 1)
+	val(scalar, 1, -6, 1)
+	val(scalar, 2, -72, 25)
+	// G values from the trace-reverse result.
+	_, gfp, err := s.Lookup(trec.ResultRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gtf, err := DecodeTensorField(gfp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, gtp, err := s.Lookup(gtf.TensorRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gtn, err := DecodeTensor(gtp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gxxq := mustResolve(t, s, gtn.ComponentRefs[0])
+	gyyq := mustResolve(t, s, gtn.ComponentRefs[4])
+	val(gxxq, 0, 0, 1)
+	val(gxxq, 1, 1, 1)
+	val(gxxq, 2, 16, 25)
+	val(gyyq, 0, 2, 1)
+	val(gyyq, 1, 4, 1)
+	val(gyyq, 2, 10, 1)
+	// H-route values from the recorded covariant result.
+	_, covP, err := s.Lookup(rec.CovariantResultRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	covTF, err := DecodeTensorField(covP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, covTP, err := s.Lookup(covTF.TensorRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	covT, err := DecodeTensor(covTP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hxx := mustResolve(t, s, covT.ComponentRefs[0])
+	hyy := mustResolve(t, s, covT.ComponentRefs[12])
+	hzz := mustResolve(t, s, covT.ComponentRefs[24])
+	for _, h := range []Expr{hxx, hyy, hzz} {
+		if h.Equal(MustRational(0, 1)) {
+			t.Fatal("warped H-route is literal zero: nontrivial computation lost")
+		}
+	}
+	val(hxx, 0, 0, 1)
+	val(hxx, 1, 0, 1)
+	val(hxx, 2, -48, 125)
+	val(hyy, 0, 0, 1)
+	val(hyy, 1, 0, 1)
+	val(hyy, 2, 24, 5)
+	val(hzz, 0, 0, 1)
+	val(hzz, 1, 0, 1)
+	val(hzz, 2, 24, 5)
+}
+
+// assertPairMultiset requires a bijective canon-normalized match between
+// stored children and expected (ginv, route) pairs. Canon sorts and flattens
+// same-kind nesting on both sides, so association churn and child order
+// never matter; atom multisets and operator-kind structure do.
+func assertPairMultiset(t *testing.T, what string, stored []Expr, pairs [][2]Expr) {
+	t.Helper()
+	if len(stored) != len(pairs) {
+		t.Fatalf("%s has %d children, want %d", what, len(stored), len(pairs))
+	}
+	used := make([]bool, len(stored))
+	for _, pr := range pairs {
+		want, err := Canonicalize(Mul(cloneExpr(pr[0]), cloneExpr(pr[1])))
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := -1
+		for j, s := range stored {
+			if used[j] {
+				continue
+			}
+			got, err := Canonicalize(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Equal(want) {
+				found = j
+				used[j] = true
+				break
+			}
+		}
+		if found < 0 {
+			t.Fatalf("%s has no child matching pair:\n%s", what, showExpr(want))
+		}
+	}
+}
+
+// taskRecomputeX independently re-derives the x-divergence value pieces: the
+// x partial of G_xx through the guarded API plus hand-built 2(f'/f)G_xx and
+// -2(f'/f^3)G_yy terms from the task formula (not from the implementation's
+// assembly). Each piece's exact values are asserted below; the exact rational
+// total is checked here. Hand values: dG (0,0,-48/125); t1 (0,2,128/125);
+// t2 (0,-2,-80/125); totals 0, 0, 0.
+func taskRecomputeX(t *testing.T, s Store, rec RiemannTraceReverseDivergenceEvaluation, trec artifact.ArtifactRef, x Expr) {
+	t.Helper()
+	two := MustRational(2, 1)
+	px := DeriveParameterID(0)
+	gxxRef := mustCompRef(t, s, trec, 0)
+	gyyRef := mustCompRef(t, s, trec, 4)
+	dGres, _, _, err := DifferentiateCoordinate(s, gxxRef, rec.ChartRef, 0, rec.Mapping, rec.DeclaringFnRef, 1, rec.ConditionRefs)
+	if err != nil {
+		t.Fatalf("task dG partial failed: %v", err)
+	}
+	dG := mustResolve(t, s, dGres)
+	f := Add(MustRational(1, 1), Pow(cloneExpr(x), MustRational(2, 1)))
+	fp := Mul(two, cloneExpr(x))
+	fi := Pow(cloneExpr(f), MustRational(-1, 1))
+	gxx := mustResolve(t, s, gxxRef)
+	gyy := mustResolve(t, s, gyyRef)
+	t1 := Mul(two, Mul(cloneExpr(fp), cloneExpr(fi)), cloneExpr(gxx))
+	t2 := Neg(Mul(two, Mul(cloneExpr(fp), cloneExpr(fi), cloneExpr(fi), cloneExpr(fi)), cloneExpr(gyy)))
+	for _, xv := range []int64{0, 1, 2} {
+		total := new(big.Rat).Add(new(big.Rat).Add(
+			evalAtRational(t, dG, px, xv), evalAtRational(t, t1, px, xv)),
+			evalAtRational(t, t2, px, xv))
+		if total.Sign() != 0 {
+			t.Fatalf("task-formula total at x=%d is %v, want 0", xv, total)
+		}
+	}
+	assertEvalValue(t, dG, px, 2, -48, 125)
+	assertEvalValue(t, t1, px, 1, 2, 1)
+	assertEvalValue(t, t2, px, 1, -2, 1)
+}
+
+// TestDivergenceProduct is the Case-A regression golden for
+// ds^2 = dr^2 + r^2 dtheta^2 + dz^2 (flat product: all curvature values
+// vanish, nonzero connection). D_y and D_z are exactly zero; D_x is a
+// two-term factored sum (rr and thth diagonal routes; the zz route strips
+// exactly). This is a regression case, not the sole correctness golden.
+func TestDivergenceProduct(t *testing.T) {
+	s := NewMemStore()
+	chart, metric, fn, mapping, _, _, _, cond := prodSetup(t, s)
+	conds := []artifact.ArtifactRef{cond}
+	_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, conds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, crec, _, err := EvaluateRiemannContraction(s, riemRec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, srec, _, err := EvaluateRiemannScalar(s, crec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, trec, _, err := EvaluateRiemannTraceReverse(s, crec, srec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, recRef, _, err := EvaluateRiemannTraceReverseDivergence(s, trec)
+	if err != nil {
+		t.Fatalf("product divergence failed: %v", err)
+	}
+	comps := divergenceComps(t, s, result)
+	if len(comps) != 3 {
+		t.Fatalf("product divergence has %d components, want 3", len(comps))
+	}
+	zero := MustRational(0, 1)
+	// y/z routes vanish: zero partials against zero products throughout.
+	for _, i := range []int{1, 2} {
+		if !comps[i].Equal(zero) {
+			t.Fatalf("product D[%d] is not exactly zero:\n%s", i, showExpr(comps[i]))
+		}
+	}
+	rec := divergenceRecord(t, s, recRef)
+	invComps := tensorComps(t, s, rec.InvTensorRef)
+	hessComps := tensorComps(t, s, mustTensorOf(t, s, rec.CovariantResultRef))
+	// D_x pairs the rr and thth diagonal routes (the zz route strips
+	// exactly since its derivative route is literal zero).
+	if comps[0].Kind != TagAdd || len(comps[0].Children) != 2 {
+		t.Fatalf("product D[0] is not a two-term sum:\n%s", showExpr(comps[0]))
+	}
+	assertPairMultiset(t, "product D[0] pairing",
+		comps[0].Children,
+		[][2]Expr{{invComps[0], hessComps[0]}, {invComps[4], hessComps[12]}})
+	for _, k := range []int{0, 12} {
+		if hessComps[k].Equal(zero) {
+			t.Fatalf("product H-route %d is literal zero: nontrivial computation lost", k)
+		}
+	}
+	// G_zz is the nonzero input: G_zz = -R/2 with R = -4/f gives 2/f.
+	// Point: x=0 -> 2, x=1 -> 1, x=2 -> 2/5. (Coordinates here are x,y,z
+	// with f = 1+x^2; there is no polar singularity in this fixture.)
+	gzz := mustResolve(t, s, mustCompRef(t, s, trec, 8))
+	px := DeriveParameterID(0)
+	assertEvalValue(t, gzz, px, 0, 2, 1)
+	assertEvalValue(t, gzz, px, 1, 1, 1)
+	assertEvalValue(t, gzz, px, 2, 2, 5)
+	if gzz.Equal(zero) {
+		t.Fatal("product G_zz is literal zero: nonzero input lost")
+	}
+	// Ricci and scalar values pin the inputs feeding the divergence:
+	// R_xx = -2/f: -2,-1,-2/5; R_yy = -2f: -2,-4,-10; R_zz exact zero;
+	// R = -4/f: -4,-2,-4/5.
+	tric := riemannContractionRecord(t, s, crec)
+	tricComps := tensorComps(t, s, mustTensorOf(t, s, tric.ResultRef))
+	assertEvalValue(t, tricComps[0], px, 0, -2, 1)
+	assertEvalValue(t, tricComps[0], px, 1, -1, 1)
+	assertEvalValue(t, tricComps[0], px, 2, -2, 5)
+	assertEvalValue(t, tricComps[4], px, 0, -2, 1)
+	assertEvalValue(t, tricComps[4], px, 1, -4, 1)
+	assertEvalValue(t, tricComps[4], px, 2, -10, 1)
+	if !tricComps[8].Equal(zero) {
+		t.Fatalf("product R_zz is not exactly zero:\n%s", showExpr(tricComps[8]))
+	}
+	srec2 := scalarRecord(t, s, srec)
+	scalar := mustResolve(t, s, srec2.ResultRef)
+	assertEvalValue(t, scalar, px, 0, -4, 1)
+	assertEvalValue(t, scalar, px, 1, -2, 1)
+	assertEvalValue(t, scalar, px, 2, -4, 5)
+	if err := CheckRiemannTraceReverseDivergence(s, recRef); err != nil {
+		t.Fatalf("product divergence rejected by Check: %v", err)
+	}
+	if err := ReplayRiemannTraceReverseDivergence(s, recRef); err != nil {
+		t.Fatalf("product divergence rejected by artifact replay: %v", err)
+	}
+}
+
+// tamperDivergenceRecord decodes a divergence record, applies mutate, and
+// re-mints it as a new artifact.
+func tamperDivergenceRecord(t *testing.T, s Store, ref artifact.ArtifactRef, mutate func(*RiemannTraceReverseDivergenceEvaluation)) artifact.ArtifactRef {
+	t.Helper()
+	rec := divergenceRecord(t, s, ref)
+	mutate(&rec)
+	raw, err := rec.Encode()
+	if err != nil {
+		t.Fatalf("tampered record does not encode: %v", err)
+	}
+	bad, err := s.Put(FamilyRiemannTraceReverseDivergence, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bad
+}
+
+// divergenceChain builds the full warped chain through the divergence record.
+func divergenceChain(t *testing.T, s Store) (df, drec, trec, crec, srec artifact.ArtifactRef) {
+	t.Helper()
+	chart, metric, fn, mapping, _, _, _, cond := warpedSetup(t, s)
+	conds := []artifact.ArtifactRef{cond}
+	_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, conds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, crec, _, err = EvaluateRiemannContraction(s, riemRec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, srec, _, err = EvaluateRiemannScalar(s, crec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, trec, _, err = EvaluateRiemannTraceReverse(s, crec, srec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	df, drec, _, err = EvaluateRiemannTraceReverseDivergence(s, trec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return df, drec, trec, crec, srec
+}
+
+// TestDivergenceAdversarial proves corrupted divergence evidence fails Check
+// and artifact Replay at the intended boundary. Polar 2D chains cover the
+// structural cases fast; warped chains cover math-sensitive ones.
+func TestDivergenceAdversarial(t *testing.T) {
+	polarChain := func(t *testing.T, s *MemStore) (artifact.ArtifactRef, artifact.ArtifactRef) {
+		t.Helper()
+		chart, metric, fn, mapping, _, _, cond := polarSetup(t, s)
+		conds := []artifact.ArtifactRef{cond}
+		_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, conds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, crec, _, err := EvaluateRiemannContraction(s, riemRec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, srec, _, err := EvaluateRiemannScalar(s, crec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, trec, _, err := EvaluateRiemannTraceReverse(s, crec, srec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		df, drec, _, err := EvaluateRiemannTraceReverseDivergence(s, trec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return df, drec
+	}
+	bothFail := func(t *testing.T, s *MemStore, bad artifact.ArtifactRef, reason string) {
+		t.Helper()
+		if err := CheckRiemannTraceReverseDivergence(s, bad); err == nil {
+			t.Fatal("corrupted record accepted by Check")
+		} else if !strings.Contains(err.Error(), reason) {
+			t.Fatalf("Check wrong boundary (want %q): %v", reason, err)
+		}
+		if err := ReplayRiemannTraceReverseDivergence(s, bad); err == nil {
+			t.Fatal("corrupted record accepted by artifact replay")
+		} else if !strings.Contains(err.Error(), reason) {
+			t.Fatalf("replay wrong boundary (want %q): %v", reason, err)
+		}
+	}
+
+	t.Run("foreign-metric-source", func(t *testing.T) {
+		s := NewMemStore()
+		_, drec := polarChain(t, s)
+		// A foreign chain over another geometry: identical fixtures would
+		// collide byte-for-byte under content addressing (correctly
+		// accepted as the same artifact), so the foreign geometry differs.
+		s2 := NewMemStore()
+		c2, m2, f2, mp2, _, _, cd2 := curvedSetup(t, s2)
+		_, rr2, _, err := EvaluateRiemann(s2, m2, c2, mp2, f2, []artifact.ArtifactRef{cd2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, cr2, _, err := EvaluateRiemannContraction(s2, rr2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, sr2, _, err := EvaluateRiemannScalar(s2, cr2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, tr2, _, err := EvaluateRiemannTraceReverse(s2, cr2, sr2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, drec2, _, err := EvaluateRiemannTraceReverseDivergence(s2, tr2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, rp, err := s2.Lookup(drec2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Re-mint foreign bytes locally: dependencies do not resolve here.
+		fr, err := s.Put(FamilyRiemannTraceReverseDivergence, rp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bothFail(t, s, fr, "unresolvable")
+		_ = drec
+	})
+
+	t.Run("mismatched-chart-mapping-connection-inverse", func(t *testing.T) {
+		s := NewMemStore()
+		_, drec := polarChain(t, s)
+		ghostChart := ComputeTestRef(t, "physmath", "coordinate_system/1")
+		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ChartRef = ghostChart })
+		bothFail(t, s, bad, "unresolvable")
+		rec := divergenceRecord(t, s, drec)
+		swapped := CoordParamMap{Entries: []BoundParameterRef{
+			rec.Mapping.Entries[1], rec.Mapping.Entries[0],
+		}}
+		badMap := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.Mapping = swapped })
+		// The record-to-Riemann mapping-equality gate fires before
+		// revalidation: the stored selection no longer matches its chart.
+		bothFail(t, s, badMap, "mapping differs")
+		ghostConn := ComputeTestRef(t, "physmath", "affine_connection/1")
+		badConn := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ConnectionRef = ghostConn })
+		bothFail(t, s, badConn, "unresolvable")
+		zero := mustStoreExpr(t, s, MustRational(0, 1))
+		badInv, err := s.Put(FamilyTensor, Tensor{Rank: 2, Dimension: 2, IndexRefs: []artifact.ArtifactRef{
+			mustStoreIndex(t, s, "a", VarianceContravariant),
+			mustStoreIndex(t, s, "b", VarianceContravariant),
+		}, ComponentRefs: []artifact.ArtifactRef{zero, zero, zero, zero}}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		badInvRef := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.InvTensorRef = badInv })
+		// Reference equality with scalar evidence fires before recompute:
+		// a foreign inverse cannot stand in for the recorded one.
+		bothFail(t, s, badInvRef, "differs from scalar evidence")
+	})
+
+	t.Run("wrong-indices-reordered-result", func(t *testing.T) {
+		s := NewMemStore()
+		_, drec := polarChain(t, s)
+		rec := divergenceRecord(t, s, drec)
+		_, fpayload, err := s.Lookup(rec.ResultRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rf, err := DecodeTensorField(fpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, tpayload, err := s.Lookup(rf.TensorRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rt, err := DecodeTensor(tpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Wrong slot variance: contravariant free slot.
+		_, cpayload, err := s.Lookup(rec.ChartRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cs, err := DecodeCoordinateSystem(cpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		upPayload, err := Index{Label: "div", Variance: VarianceContravariant, Space: &cs.SpaceRef}.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		upRef, err := s.Put(FamilyIndex, upPayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wrongTensor, err := s.Put(FamilyTensor, Tensor{Rank: 1, Dimension: 2, IndexRefs: []artifact.ArtifactRef{upRef}, ComponentRefs: rt.ComponentRefs}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		wrongField, err := s.Put(FamilyTensorField, TensorField{TensorRef: wrongTensor, CoordinateSystemRef: rf.CoordinateSystemRef}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ResultRef = wrongField })
+		// A substituted slot reference fails full-reference identity before
+		// variance inspection; the variance/space gates below remain as
+		// defense for non-content-addressed stores.
+		bothFail(t, s, bad, "identity broken")
+	})
+
+	t.Run("substituted-result-tampered-step", func(t *testing.T) {
+		s := NewMemStore()
+		_, drec := polarChain(t, s)
+		rec := divergenceRecord(t, s, drec)
+		other := mustStoreExpr(t, s, MustRational(13, 1))
+		// Substitute the result field with an expression artifact.
+		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ResultRef = other })
+		bothFail(t, s, bad, "not in closed target set")
+		_, dpayload, err := s.Lookup(rec.DerivationRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := DecodeDerivation(dpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Steps[len(d.Steps)-1].OutputRef = other
+		draw, err := d.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		altDeriv, err := s.Put(FamilyDerivation, draw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		badDeriv := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DerivationRef = altDeriv })
+		bothFail(t, s, badDeriv, "output mismatch")
+	})
+
+	t.Run("tampered-conditions-ghost-codec", func(t *testing.T) {
+		s := NewMemStore()
+		_, drec := polarChain(t, s)
+		rec := divergenceRecord(t, s, drec)
+		empty := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ConditionRefs = nil })
+		bothFail(t, s, empty, "condition")
+		ghost := ComputeTestRef(t, "physmath", "riemann_trace_reverse_divergence/1")
+		if err := CheckRiemannTraceReverseDivergence(s, ghost); err == nil {
+			t.Fatal("unresolvable record accepted")
+		}
+		if err := ReplayRiemannTraceReverseDivergence(s, ghost); err == nil {
+			t.Fatal("unresolvable record replayed")
+		}
+		exprRef := mustStoreExpr(t, s, MustRational(1, 1))
+		if err := CheckRiemannTraceReverseDivergence(s, exprRef); err == nil {
+			t.Fatal("expression target accepted")
+		}
+		raw, err := rec.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DecodeRiemannTraceReverseDivergenceEvaluation(raw); err != nil {
+			t.Fatalf("record does not round-trip: %v", err)
+		}
+		if _, err := DecodeRiemannTraceReverseDivergenceEvaluation(raw[:len(raw)/2]); err == nil {
+			t.Fatal("truncated record accepted")
+		}
+		if _, err := DecodeRiemannTraceReverseDivergenceEvaluation(append(append([]byte{}, raw...), 0x00)); err == nil {
+			t.Fatal("trailing bytes accepted")
+		}
+		dup := rec
+		dup.ConditionRefs = []artifact.ArtifactRef{rec.ConditionRefs[0], rec.ConditionRefs[0]}
+		if err := dup.Validate(); err == nil {
+			t.Fatal("duplicate-condition record validated")
+		}
+		emptyMap := rec
+		emptyMap.Mapping = CoordParamMap{}
+		if err := emptyMap.Validate(); err == nil {
+			t.Fatal("empty-mapping record validated")
+		}
+	})
+
+	t.Run("reordered-covariant-evidence", func(t *testing.T) {
+		s := NewMemStore()
+		_, drec := polarChain(t, s)
+		// Substitute the covariant evidence field with the result field:
+		// rank and content mismatch the recorded rank-3 evidence.
+		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.CovariantResultRef = r.ResultRef })
+		bothFail(t, s, bad, "covariant shape wrong")
+	})
+}
+
+// mustStoreIndex mints an index/1 artifact without a space reference check.
+func mustStoreIndex(t *testing.T, s Store, label string, v IndexVariance) artifact.ArtifactRef {
+	t.Helper()
+	desig := mustStoreExpr(t, s, NewEphemeralSymbol("idx_space_"+label))
+	raw, err := Collection{ElementRefs: []artifact.ArtifactRef{desig}}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	space, err := s.Put(FamilyCollection, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Index{Label: label, Variance: v, Space: &space}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := s.Put(FamilyIndex, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ref
 }
