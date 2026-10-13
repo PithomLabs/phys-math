@@ -35,7 +35,7 @@ func diffInvoke(t *testing.T, s Store, fnRef artifact.ArtifactRef, pid Parameter
 func TestDifferentiateNegativePow(t *testing.T) {
 	s := NewMemStore()
 	p0 := DeriveParameterID(0)
-	fnRef, _ := mustStoreFunction(t, s, 1, NewBoundSymbol("a", p0))
+	fnRef, _ := mustStoreFunction(t, s, []string{"x"}, NewBoundSymbol("x", p0))
 	x := NewBoundSymbol("x", p0)
 	in := mustStoreExpr(t, s, Pow(x, MustRational(-2, 1)))
 
@@ -92,7 +92,7 @@ func TestDifferentiateNegativePow(t *testing.T) {
 func TestDifferentiateReciprocal(t *testing.T) {
 	s := NewMemStore()
 	p0 := DeriveParameterID(0)
-	fnRef, _ := mustStoreFunction(t, s, 1, NewBoundSymbol("a", p0))
+	fnRef, _ := mustStoreFunction(t, s, []string{"x"}, NewBoundSymbol("x", p0))
 	x := NewBoundSymbol("x", p0)
 	in := mustStoreExpr(t, s, Pow(x, MustRational(-1, 1)))
 	cond := neqCond(t, s, x)
@@ -111,8 +111,8 @@ func TestDifferentiateNegativePowComposite(t *testing.T) {
 	s := NewMemStore()
 	p0 := DeriveParameterID(0)
 	p1 := DeriveParameterID(1)
-	fnRef, _ := mustStoreFunction(t, s, 2,
-		Mul(NewBoundSymbol("a", p0), NewBoundSymbol("b", p1)))
+	fnRef, _ := mustStoreFunction(t, s, []string{"x", "y"},
+		Mul(NewBoundSymbol("x", p0), NewBoundSymbol("y", p1)))
 	x := NewBoundSymbol("x", p0)
 	y := NewBoundSymbol("y", p1)
 	base := Mul(x, y)
@@ -145,7 +145,7 @@ func TestDifferentiateNegativePowComposite(t *testing.T) {
 func TestDifferentiateNegativePowConstantBase(t *testing.T) {
 	s := NewMemStore()
 	p0 := DeriveParameterID(0)
-	fnRef, _ := mustStoreFunction(t, s, 1, NewBoundSymbol("a", p0))
+	fnRef, _ := mustStoreFunction(t, s, []string{"x"}, NewBoundSymbol("x", p0))
 	two := MustRational(2, 1)
 	in := mustStoreExpr(t, s, Pow(two, MustRational(-3, 1)))
 	cond := neqCond(t, s, two)
@@ -161,7 +161,7 @@ func TestDifferentiateNegativePowConstantBase(t *testing.T) {
 func TestDifferentiateNegativePowOrderTwo(t *testing.T) {
 	s := NewMemStore()
 	p0 := DeriveParameterID(0)
-	fnRef, _ := mustStoreFunction(t, s, 1, NewBoundSymbol("a", p0))
+	fnRef, _ := mustStoreFunction(t, s, []string{"x"}, NewBoundSymbol("x", p0))
 	x := NewBoundSymbol("x", p0)
 	in := mustStoreExpr(t, s, Pow(x, MustRational(-1, 1)))
 	cond := neqCond(t, s, x)
@@ -181,7 +181,7 @@ func TestDifferentiateNegativePowOrderTwo(t *testing.T) {
 func TestDifferentiatePowStillRejectsNonInteger(t *testing.T) {
 	s := NewMemStore()
 	p0 := DeriveParameterID(0)
-	fnRef, _ := mustStoreFunction(t, s, 1, NewBoundSymbol("a", p0))
+	fnRef, _ := mustStoreFunction(t, s, []string{"x"}, NewBoundSymbol("x", p0))
 	x := NewBoundSymbol("x", p0)
 	half := mustStoreExpr(t, s, Pow(x, MustRational(1, 2)))
 	cond := neqCond(t, s, x)

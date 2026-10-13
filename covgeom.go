@@ -528,3 +528,101 @@ func CheckCoordParamMap(store Store, chartRef artifact.ArtifactRef, m CoordParam
 	}
 	return nil
 }
+
+// ValidateCoordBinding is the single authoritative chart-binding contract
+// for reusable geometry (Plan 1.14 prerequisite 1 with the exact-identity
+// clarification). It enforces, for every chart coordinate index i, all
+// three identity legs — never inferring identity from names alone:
+//
+//  1. Exact parameter identity: the decoded chart coordinate symbol's
+//     ParameterID equals mapping.Entries[i].ParameterID. A mismatch fails
+//     here even when both symbols carry identical display names.
+//  2. Declaring context: each mapping entry references declaringFnRef and
+//     names a PID declared by it. This leg reuses CheckCoordParamMap; no
+//     logic is duplicated.
+//  3. Name consistency: the declaring Function records non-empty ParamNames
+//     (ErrMissingIdentity otherwise), and ParamNames[slot(PID)] equals the
+//     chart coordinate's display name.
+//
+// Operand scoping from CheckDisjointIdentity applies when operandRefs is
+// non-empty: mapped-PID symbols must display-match the chart coordinate,
+// unmapped PIDs (independent quantities) pass, and byte-identical shared
+// identities pass. Vacuous use (a valid coordinate absent from an operand)
+// is unaffected: body membership is never consulted.
+//
+// Residual limitation (documented, not fixed): identical (display, PID)
+// bytes under different declaring functions are indistinguishable to this
+// check. Raw DIFFERENTIATE-001 callers outside the guarded path and direct
+// structural Put of chart/connection families remain outside this scope by
+// design; see DifferentiateCoordinate for the trusted path.
+func ValidateCoordBinding(store Store, chartRef artifact.ArtifactRef, mapping CoordParamMap, declaringFnRef artifact.ArtifactRef, operandRefs []artifact.ArtifactRef) error {
+	if err := CheckCoordParamMap(store, chartRef, mapping, declaringFnRef); err != nil {
+		return err
+	}
+	_, cpayload, err := store.Lookup(chartRef)
+	if err != nil {
+		return fmt.Errorf("physmath: coord-binding chart unresolvable: %w", err)
+	}
+	chart, err := DecodeCoordinateSystem(cpayload)
+	if err != nil {
+		return err
+	}
+	fn, err := resolveFunction(store, declaringFnRef)
+	if err != nil {
+		return fmt.Errorf("physmath: coord-binding declaring function unresolvable: %w", err)
+	}
+	if len(fn.ParamNames) == 0 {
+		return fmt.Errorf("%w: trusted chart binding needs Function display names", ErrMissingIdentity)
+	}
+	if len(fn.ParamNames) != len(fn.ParameterIDs) {
+		return fmt.Errorf("%w: coord-binding ParamNames/ParameterIDs length mismatch", ErrBadInput)
+	}
+	slotOf := make(map[ParameterID]int, len(fn.ParameterIDs))
+	for i, id := range fn.ParameterIDs {
+		slotOf[id] = i
+	}
+	for i, r := range chart.CoordinateRefs {
+		fam, payload, err := store.Lookup(r)
+		if err != nil {
+			return fmt.Errorf("physmath: coord-binding coordinate %d unresolvable: %w", i, err)
+		}
+		if fam != FamilyExpression {
+			return fmt.Errorf("physmath: coord-binding coordinate %d is not expression/1: %w", i, ErrBadInput)
+		}
+		e, err := DecodeExpr(artifact.NewDecoder(payload))
+		if err != nil {
+			return fmt.Errorf("physmath: coord-binding coordinate %d undecodable: %w", i, err)
+		}
+		if e.Kind != TagSymbol {
+			return fmt.Errorf("physmath: coord-binding coordinate %d is not a symbol: %w", i, ErrBadInput)
+		}
+		if e.ParamID == nil {
+			return fmt.Errorf("physmath: coord-binding coordinate %d carries no ParameterID: %w", i, ErrBadInput)
+		}
+		entry := mapping.Entries[i]
+		if *e.ParamID != entry.ParameterID {
+			return fmt.Errorf("physmath: chart-coordinate PID mismatch at position %d: coordinate %q binds another identity than the mapping entry: %w",
+				i, e.DisplayName, ErrBadInput)
+		}
+		if entry.DeclaringArtifactRef != declaringFnRef {
+			return fmt.Errorf("physmath: coord-binding entry %d references another function: %w", i, ErrBadInput)
+		}
+		slot, ok := slotOf[entry.ParameterID]
+		if !ok {
+			return fmt.Errorf("physmath: coord-binding entry %d not declared by function: %w", i, ErrBadInput)
+		}
+		if fn.ParamNames[slot] == "" {
+			return fmt.Errorf("physmath: coord-binding empty declared display name at position %d: %w", i, ErrBadInput)
+		}
+		if fn.ParamNames[slot] != e.DisplayName {
+			return fmt.Errorf("physmath: declared parameter name %q does not match chart coordinate %q at position %d: %w",
+				fn.ParamNames[slot], e.DisplayName, i, ErrBadInput)
+		}
+	}
+	if len(operandRefs) > 0 {
+		if err := CheckDisjointIdentity(store, chartRef, mapping, declaringFnRef, operandRefs); err != nil {
+			return err
+		}
+	}
+	return nil
+}

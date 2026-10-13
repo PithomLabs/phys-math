@@ -7,11 +7,13 @@ import (
 	"github.com/PithomLabs/phys-artifact"
 )
 
-// mintFunction mints a function/1 artifact with explicit parameter IDs.
-func mintFunction(t *testing.T, s Store, ids []ParameterID, body Expr) artifact.ArtifactRef {
+// mintFunction mints a function/1 artifact with explicit parameter IDs and
+// explicit parameter names (authoritative display vocabulary; never inferred
+// from the body).
+func mintFunction(t *testing.T, s Store, ids []ParameterID, names []string, body Expr) artifact.ArtifactRef {
 	t.Helper()
 	bodyRef := mustStoreExpr(t, s, body)
-	fn := Function{ParameterIDs: ids, BodyRef: bodyRef}
+	fn := Function{ParameterIDs: ids, ParamNames: names, BodyRef: bodyRef}
 	if err := ValidateFunctionBody(fn, body); err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +32,7 @@ func mintFunction(t *testing.T, s Store, ids []ParameterID, body Expr) artifact.
 func timeSetup(t *testing.T, s Store, pid ParameterID) (artifact.ArtifactRef, Expr) {
 	t.Helper()
 	tsym := NewBoundSymbol("t", pid)
-	return mintFunction(t, s, []ParameterID{pid}, tsym), tsym
+	return mintFunction(t, s, []ParameterID{pid}, []string{"t"}, tsym), tsym
 }
 
 func totalParams(fnRef artifact.ArtifactRef, pid ParameterID, order uint32) []byte {
@@ -44,7 +46,7 @@ func TestTotalDerivativeChain(t *testing.T) {
 	pa := DeriveParameterID(0)
 	timeFn, tsym := timeSetup(t, s, pt)
 	asym := NewBoundSymbol("a", pa)
-	afn := mintFunction(t, s, []ParameterID{pa}, Pow(asym, MustRational(2, 1)))
+	afn := mintFunction(t, s, []ParameterID{pa}, []string{"a"}, Pow(asym, MustRational(2, 1)))
 	call := Call(afn, tsym)
 	in := mustStoreExpr(t, s, call)
 	res := applyRule(t, s, RuleTotalDerivative, []artifact.ArtifactRef{in, timeFn}, nil,
@@ -86,9 +88,9 @@ func TestTotalDerivativeNested(t *testing.T) {
 	pc := DeriveParameterID(0)
 	timeFn, tsym := timeSetup(t, s, pt)
 	asym := NewBoundSymbol("a", pa)
-	afn := mintFunction(t, s, []ParameterID{pa}, Pow(asym, MustRational(2, 1)))
+	afn := mintFunction(t, s, []ParameterID{pa}, []string{"a"}, Pow(asym, MustRational(2, 1)))
 	csym := NewBoundSymbol("c", pc)
-	cfn := mintFunction(t, s, []ParameterID{pc}, Neg(csym))
+	cfn := mintFunction(t, s, []ParameterID{pc}, []string{"c"}, Neg(csym))
 	inner := Call(afn, tsym)
 	outer := Call(cfn, inner)
 	in := mustStoreExpr(t, s, outer)
@@ -110,7 +112,7 @@ func TestTotalDerivativeOrderTwo(t *testing.T) {
 	pa := DeriveParameterID(0)
 	timeFn, tsym := timeSetup(t, s, pt)
 	asym := NewBoundSymbol("a", pa)
-	afn := mintFunction(t, s, []ParameterID{pa}, Pow(asym, MustRational(2, 1)))
+	afn := mintFunction(t, s, []ParameterID{pa}, []string{"a"}, Pow(asym, MustRational(2, 1)))
 	in := mustStoreExpr(t, s, Call(afn, tsym))
 	// Higher orders manufacture Pow(t,0) intermediates (d(t^1)/dt), so the
 	// exact NEQ(t,0) condition is required for full simplification.
@@ -133,9 +135,9 @@ func TestTotalDerivativeQuotient(t *testing.T) {
 	pn := DeriveParameterID(0)
 	timeFn, tsym := timeSetup(t, s, pt)
 	asym := NewBoundSymbol("a", pa)
-	afn := mintFunction(t, s, []ParameterID{pa}, asym)
+	afn := mintFunction(t, s, []ParameterID{pa}, []string{"a"}, asym)
 	nsym := NewBoundSymbol("n", pn)
-	nfn := mintFunction(t, s, []ParameterID{pn}, nsym)
+	nfn := mintFunction(t, s, []ParameterID{pn}, []string{"n"}, nsym)
 	aCall := Call(afn, tsym)
 	nCall := Call(nfn, tsym)
 	q := Mul(Pow(aCall, MustRational(3, 1)), Pow(nCall, MustRational(-1, 1)))
@@ -207,7 +209,7 @@ func TestTotalDerivativeNegatives(t *testing.T) {
 	pa := DeriveParameterID(0)
 	timeFn, tsym := timeSetup(t, s, pt)
 	asym := NewBoundSymbol("a", pa)
-	afn := mintFunction(t, s, []ParameterID{pa}, Pow(asym, MustRational(2, 1)))
+	afn := mintFunction(t, s, []ParameterID{pa}, []string{"a"}, Pow(asym, MustRational(2, 1)))
 	in := mustStoreExpr(t, s, Call(afn, tsym))
 	bad := func(params []byte, inputs []artifact.ArtifactRef, conds []artifact.ArtifactRef) error {
 		_, err := Apply(s, Invocation{ProducerNamespace: NamespacePhysMath,
@@ -216,7 +218,7 @@ func TestTotalDerivativeNegatives(t *testing.T) {
 		return err
 	}
 	// BPR bound to another function.
-	otherFn, _ := mustStoreFunction(t, s, 1, NewBoundSymbol("v", pt))
+	otherFn, _ := mustStoreFunction(t, s, []string{"v"}, NewBoundSymbol("v", pt))
 	otherBPR := append(BoundParameterRef{otherFn, pt}.Encode(), artifact.EncodeUInt32(1)...)
 	if err := bad(otherBPR, []artifact.ArtifactRef{in, timeFn}, nil); err == nil {
 		t.Fatal("mismatched BPR accepted")
@@ -267,9 +269,9 @@ func TestTotalDerivativeConservationShape(t *testing.T) {
 	pn := DeriveParameterID(0)
 	timeFn, tsym := timeSetup(t, s, pt)
 	asym := NewBoundSymbol("a", pa)
-	afn := mintFunction(t, s, []ParameterID{pa}, asym)
+	afn := mintFunction(t, s, []ParameterID{pa}, []string{"a"}, asym)
 	nsym := NewBoundSymbol("n", pn)
-	nfn := mintFunction(t, s, []ParameterID{pn}, nsym)
+	nfn := mintFunction(t, s, []ParameterID{pn}, []string{"n"}, nsym)
 	aCall := Call(afn, tsym)
 	nCall := Call(nfn, tsym)
 	inner := Mul(Pow(aCall, MustRational(3, 1)), Pow(nCall, MustRational(-1, 1)))

@@ -41,7 +41,7 @@ func covChart(t *testing.T, s Store, names ...string) (artifact.ArtifactRef, Coo
 	if n > 1 {
 		body = Mul(syms[0], syms[1])
 	}
-	fnObj := Function{ParameterIDs: pids, BodyRef: mustStoreExpr(t, s, body)}
+	fnObj := Function{ParameterIDs: pids, ParamNames: names, BodyRef: mustStoreExpr(t, s, body)}
 	fnBytes, err := fnObj.Encode()
 	if err != nil {
 		t.Fatal(err)

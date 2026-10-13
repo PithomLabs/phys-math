@@ -263,6 +263,81 @@ func ruleSubstitute(store Store, inv Invocation) (Expr, error) {
 	return walk(target), nil
 }
 
+// checkDiffTarget enforces the differentiation-variable identity contract
+// shared by DIFFERENTIATE-001 and TOTAL-DERIVATIVE-001: the declaring
+// function must record a display name for the target parameter, and every
+// symbol in the target tree carrying the target PID must display-match it.
+// This rejects wrong-variable requests (same PID, foreign display) while
+// preserving vacuous differentiation (absent variable differentiates to
+// zero), nested expressions (full tree walk), and legitimate shared
+// identities (byte-identical symbols pass). Symbols under other PIDs are
+// independent quantities and are never examined.
+func checkDiffTarget(fn Function, target Expr, targetPID ParameterID) error {
+	if len(fn.ParamNames) == 0 {
+		return fmt.Errorf("%w: trusted differentiation needs Function display names", ErrMissingIdentity)
+	}
+	if len(fn.ParamNames) != len(fn.ParameterIDs) {
+		return fmt.Errorf("%w: ParamNames/ParameterIDs length mismatch", ErrBadInput)
+	}
+	slot := -1
+	for i, id := range fn.ParameterIDs {
+		if id == targetPID {
+			slot = i
+			break
+		}
+	}
+	if slot < 0 {
+		return fmt.Errorf("%w: target parameter not declared by function", ErrBadInput)
+	}
+	expected := fn.ParamNames[slot]
+	if expected == "" {
+		return fmt.Errorf("%w: empty declared display name", ErrBadInput)
+	}
+	var walk func(e Expr) error
+	walk = func(e Expr) error {
+		if e.Kind == TagSymbol && e.ParamID != nil && *e.ParamID == targetPID && e.DisplayName != expected {
+			return fmt.Errorf("%w: symbol %q does not denote declared variable %q",
+				ErrBadInput, e.DisplayName, expected)
+		}
+		switch e.Kind {
+		case TagAdd, TagMul:
+			for _, c := range e.Children {
+				if err := walk(c); err != nil {
+					return err
+				}
+			}
+		case TagNeg:
+			return walk(*e.Operand)
+		case TagPow:
+			if err := walk(*e.Base); err != nil {
+				return err
+			}
+			return walk(*e.Exp)
+		case TagSqrt:
+			return walk(*e.Radicand)
+		case TagCall:
+			for _, a := range e.Args {
+				if err := walk(a); err != nil {
+					return err
+				}
+			}
+		case TagRelation:
+			if err := walk(*e.Left); err != nil {
+				return err
+			}
+			return walk(*e.Right)
+		case TagBranch:
+			for _, b := range e.Branches {
+				if err := walk(b); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return walk(target)
+}
+
 // ruleDifferentiate implements DIFFERENTIATE-001 (§17.9): ordinary partial
 // differentiation of scalar expressions with respect to one target ParameterID.
 //
@@ -317,6 +392,9 @@ func ruleDifferentiate(store Store, inv Invocation) (Expr, error) {
 	}
 	if order < 1 {
 		return Expr{}, fmt.Errorf("%w: Order must be >= 1", ErrBadParameters)
+	}
+	if err := checkDiffTarget(fn, target, bpr.ParameterID); err != nil {
+		return Expr{}, err
 	}
 	var bodies [][]byte
 	for _, c := range normalizeConditionRefs(inv.ConditionRefs) {

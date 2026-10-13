@@ -17,10 +17,12 @@ func mustStoreExpr(t *testing.T, s Store, e Expr) artifact.ArtifactRef {
 	return ref
 }
 
-// mustStoreFunction mints a Function with ordinal PIDs and a validated body.
-func mustStoreFunction(t *testing.T, s Store, n int, body Expr) (artifact.ArtifactRef, Function) {
+// mustStoreFunction mints a Function with ordinal PIDs, explicit parameter
+// names (the authoritative display vocabulary for differentiation identity),
+// and a validated body. names may be nil only in legacy-decode fixtures.
+func mustStoreFunction(t *testing.T, s Store, names []string, body Expr) (artifact.ArtifactRef, Function) {
 	t.Helper()
-	ids := make([]ParameterID, n)
+	ids := make([]ParameterID, len(names))
 	for i := range ids {
 		ids[i] = DeriveParameterID(uint32(i))
 	}
@@ -32,7 +34,7 @@ func mustStoreFunction(t *testing.T, s Store, n int, body Expr) (artifact.Artifa
 	if err != nil {
 		t.Fatal(err)
 	}
-	fn := Function{ParameterIDs: ids, BodyRef: bodyRef}
+	fn := Function{ParameterIDs: ids, ParamNames: names, BodyRef: bodyRef}
 	if err := ValidateFunctionBody(fn, body); err != nil {
 		t.Fatalf("fixture body invalid: %v", err)
 	}
@@ -288,7 +290,7 @@ func TestRatNormalize(t *testing.T) {
 func TestApplyBoundary(t *testing.T) {
 	s := NewMemStore()
 	p0 := DeriveParameterID(0)
-	fnRef, _ := mustStoreFunction(t, s, 1, Mul(MustRational(2, 1), NewBoundSymbol("v", p0)))
+	fnRef, _ := mustStoreFunction(t, s, []string{"v"}, Mul(MustRational(2, 1), NewBoundSymbol("v", p0)))
 	inner := mustStoreExpr(t, s, Call(fnRef, NewEphemeralSymbol("x")))
 	res := applyRule(t, s, RuleExprApply, []artifact.ArtifactRef{inner, fnRef}, nil, nil)
 	want := Mul(MustRational(2, 1), NewEphemeralSymbol("x"))
@@ -302,13 +304,13 @@ func TestApplyBoundary(t *testing.T) {
 		t.Fatal("nested Call selected without isolation")
 	}
 	// Mismatched FunctionRef.
-	otherFn, _ := mustStoreFunction(t, s, 1, NewBoundSymbol("v", p0))
+	otherFn, _ := mustStoreFunction(t, s, []string{"v"}, NewBoundSymbol("v", p0))
 	if _, err := Apply(s, Invocation{ProducerNamespace: NamespacePhysMath,
 		RuleID: RuleExprApply, InputRefs: []artifact.ArtifactRef{inner, otherFn}}); err == nil {
 		t.Fatal("mismatched FunctionRef accepted")
 	}
 	// Arity mismatch.
-	twoFn, _ := mustStoreFunction(t, s, 2,
+	twoFn, _ := mustStoreFunction(t, s, []string{"a", "b"},
 		Mul(NewBoundSymbol("a", DeriveParameterID(0)), NewBoundSymbol("b", DeriveParameterID(1))))
 	if _, err := Apply(s, Invocation{ProducerNamespace: NamespacePhysMath,
 		RuleID: RuleExprApply, InputRefs: []artifact.ArtifactRef{inner, twoFn}}); err == nil {
@@ -320,7 +322,7 @@ func TestApplyBoundary(t *testing.T) {
 func TestSubstitute(t *testing.T) {
 	s := NewMemStore()
 	p0 := DeriveParameterID(0)
-	fnRef, _ := mustStoreFunction(t, s, 1, NewBoundSymbol("v", p0))
+	fnRef, _ := mustStoreFunction(t, s, []string{"v"}, NewBoundSymbol("v", p0))
 	target := mustStoreExpr(t, s, Add(NewBoundSymbol("g", p0), MustRational(1, 1)))
 	rep := mustStoreExpr(t, s, Mul(NewEphemeralSymbol("y"), MustRational(3, 1)))
 	entry := append(BoundParameterRef{fnRef, p0}.Encode(), rep.Encode()...)
@@ -332,7 +334,7 @@ func TestSubstitute(t *testing.T) {
 		t.Fatal("SUBSTITUTE result wrong")
 	}
 	// Missing declaring context.
-	otherFn, _ := mustStoreFunction(t, s, 1, Mul(MustRational(3, 1), NewBoundSymbol("v", p0)))
+	otherFn, _ := mustStoreFunction(t, s, []string{"v"}, Mul(MustRational(3, 1), NewBoundSymbol("v", p0)))
 	entry2 := append(BoundParameterRef{otherFn, p0}.Encode(), rep.Encode()...)
 	params2 := append(artifact.EncodeUInt32(1), entry2...)
 	if _, err := Apply(s, Invocation{ProducerNamespace: NamespacePhysMath,
@@ -362,8 +364,8 @@ func TestDifferentiate(t *testing.T) {
 	s := NewMemStore()
 	p0 := DeriveParameterID(0)
 	p1 := DeriveParameterID(1)
-	fnRef, _ := mustStoreFunction(t, s, 2,
-		Mul(NewBoundSymbol("a", p0), NewBoundSymbol("b", p1)))
+	fnRef, _ := mustStoreFunction(t, s, []string{"x", "y"},
+		Mul(NewBoundSymbol("x", p0), NewBoundSymbol("y", p1)))
 	diffParams := func(pid ParameterID, order uint32) []byte {
 		return append(BoundParameterRef{fnRef, pid}.Encode(), artifact.EncodeUInt32(order)...)
 	}
@@ -398,7 +400,7 @@ func TestDifferentiate(t *testing.T) {
 		t.Fatal("other parameter did not differentiate to 0")
 	}
 	// Mismatched declaring function rejected.
-	otherFn, _ := mustStoreFunction(t, s, 1, NewBoundSymbol("v", p0))
+	otherFn, _ := mustStoreFunction(t, s, []string{"v"}, NewBoundSymbol("v", p0))
 	badBPR := append(BoundParameterRef{otherFn, p0}.Encode(), artifact.EncodeUInt32(1)...)
 	if _, err := Apply(s, Invocation{ProducerNamespace: NamespacePhysMath,
 		RuleID: RuleDifferentiate, InputRefs: []artifact.ArtifactRef{in, fnRef},

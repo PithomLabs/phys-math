@@ -14,8 +14,8 @@ func TestReplayEquivShape(t *testing.T) {
 	p0, p1 := DeriveParameterID(0), DeriveParameterID(1)
 	g := NewBoundSymbol("g", p0)
 	x := NewBoundSymbol("x", p1)
-	fRef, _ := mustStoreFunction(t, s, 1, Mul(MustRational(2, 1), NewBoundSymbol("v", p0)))
-	rhoRef, _ := mustStoreFunction(t, s, 2,
+	fRef, _ := mustStoreFunction(t, s, []string{"v"}, Mul(MustRational(2, 1), NewBoundSymbol("v", p0)))
+	rhoRef, _ := mustStoreFunction(t, s, []string{"g", "v"},
 		Mul(NewBoundSymbol("g", p0), NewBoundSymbol("v", p1)))
 
 	innerRho := mustStoreExpr(t, s, Call(rhoRef, g, x))
@@ -134,7 +134,7 @@ func mustEncode(t *testing.T, e Expr) []byte {
 func TestReplayNegatives(t *testing.T) {
 	s := NewMemStore()
 	p0 := DeriveParameterID(0)
-	fRef, _ := mustStoreFunction(t, s, 1, Mul(MustRational(2, 1), NewBoundSymbol("v", p0)))
+	fRef, _ := mustStoreFunction(t, s, []string{"v"}, Mul(MustRational(2, 1), NewBoundSymbol("v", p0)))
 	inner := mustStoreExpr(t, s, Call(fRef, NewEphemeralSymbol("x")))
 	res, err := Apply(s, Invocation{ProducerNamespace: NamespacePhysMath,
 		RuleID: RuleExprApply, InputRefs: []artifact.ArtifactRef{inner, fRef}})

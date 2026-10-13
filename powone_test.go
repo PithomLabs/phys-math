@@ -12,7 +12,7 @@ import (
 func TestDifferentiateFirstPower(t *testing.T) {
 	s := NewMemStore()
 	p0 := DeriveParameterID(0)
-	fnRef, _ := mustStoreFunction(t, s, 1, NewBoundSymbol("a", p0))
+	fnRef, _ := mustStoreFunction(t, s, []string{"x"}, NewBoundSymbol("x", p0))
 	params := func() []byte {
 		return append(BoundParameterRef{fnRef, p0}.Encode(), artifact.EncodeUInt32(1)...)
 	}
@@ -25,8 +25,8 @@ func TestDifferentiateFirstPower(t *testing.T) {
 	}
 	// Composite base: d((x*y)^1)/dx = d(x*y), chain preserved.
 	p1 := DeriveParameterID(1)
-	fn2, _ := mustStoreFunction(t, s, 2,
-		Mul(NewBoundSymbol("a", p0), NewBoundSymbol("b", p1)))
+	fn2, _ := mustStoreFunction(t, s, []string{"x", "y"},
+		Mul(NewBoundSymbol("x", p0), NewBoundSymbol("y", p1)))
 	y := NewBoundSymbol("y", p1)
 	base := Mul(x, y)
 	in2 := mustStoreExpr(t, s, Pow(base, MustRational(1, 1)))

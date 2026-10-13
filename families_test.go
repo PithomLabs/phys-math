@@ -21,10 +21,9 @@ func refFamily(ns, typ string) FamilyID { return FamilyID{ns, typ, "1"} }
 
 func TestRegistryCompleteness(t *testing.T) {
 	fams := AllPhysMathFamilies()
-	// K1 slice grows the registry 16 -> 26 (A1-A3 + R3 VolumeDensity + CONTRACT-EVAL + variation + covgeom chart/field/connection, representation only).
-	// extension; representation + structural validation only).
-	if len(fams) != 26 {
-		t.Fatalf("registry has %d families, want 26", len(fams))
+	// Plan 1.15 grows the registry 27 -> 28 (metric-derived riemann_evaluation/1 record; no new executable rule).
+	if len(fams) != 28 {
+		t.Fatalf("registry has %d families, want 28", len(fams))
 	}
 	seen := map[FamilyID]bool{}
 	for _, f := range fams {

@@ -74,6 +74,15 @@ func ruleTotalDerivative(store Store, inv Invocation) (Expr, error) {
 	if order < 1 {
 		return Expr{}, fmt.Errorf("%w: Order must be >= 1", ErrBadParameters)
 	}
+	// Validate against the expanded tree: substitution inserts call
+	// arguments whose bound symbols differentiation actually traverses.
+	expanded0, err := expandCalls(store, target)
+	if err != nil {
+		return Expr{}, err
+	}
+	if err := checkDiffTarget(fn, expanded0, bpr.ParameterID); err != nil {
+		return Expr{}, err
+	}
 	var bodies [][]byte
 	for _, c := range normalizeConditionRefs(inv.ConditionRefs) {
 		body, err := resolveConditionBody(store, c)

@@ -160,7 +160,8 @@ func TestCoordParamMapGates(t *testing.T) {
 	p0 := DeriveParameterID(0)
 	p1 := DeriveParameterID(1)
 	fn := Function{ParameterIDs: []ParameterID{p0, p1},
-		BodyRef: mustStoreExpr(t, s, NewBoundSymbol("r", p0))}
+		ParamNames: []string{"r", "theta"},
+		BodyRef:    mustStoreExpr(t, s, NewBoundSymbol("r", p0))}
 	fnBytes, err := fn.Encode()
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +214,7 @@ func TestCoordParamMapGates(t *testing.T) {
 		t.Fatal("short mapping accepted")
 	}
 	// Cross-function entry.
-	other, _ := mustStoreFunction(t, s, 1, NewBoundSymbol("v", p0))
+	other, _ := mustStoreFunction(t, s, []string{"v"}, NewBoundSymbol("v", p0))
 	cross := CoordParamMap{Entries: []BoundParameterRef{
 		{DeclaringArtifactRef: fnRef, ParameterID: p0},
 		{DeclaringArtifactRef: other, ParameterID: p0},

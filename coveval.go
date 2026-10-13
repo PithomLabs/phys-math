@@ -107,7 +107,13 @@ func resolveCovInputs(store Store, fieldRef, connRef artifact.ArtifactRef, mappi
 		return fail(fmt.Errorf("physmath: covariant dimension %d exceeds bound %d: %w",
 			d, MatrixDimBound, ErrBadInput))
 	}
-	if err := CheckCoordParamMap(store, field.CoordinateSystemRef, mapping, declaringFnRef); err != nil {
+	// Single shared chart-binding contract (Plan 1.14): mapping validity,
+	// exact chart-coordinate parameter identity, declaring-function names,
+	// and operand disjointness. Runs before the first mint below, so it
+	// also covers checker recomputation and Laplacian stages, which all
+	// route through this function.
+	if err := ValidateCoordBinding(store, field.CoordinateSystemRef, mapping, declaringFnRef,
+		append(append([]artifact.ArtifactRef{}, tn.ComponentRefs...), conn.CoefficientRefs...)); err != nil {
 		return fail(err)
 	}
 	indices := make([]Index, len(tn.IndexRefs))
@@ -158,15 +164,6 @@ func resolveCovInputs(store Store, fieldRef, connRef artifact.ArtifactRef, mappi
 		}
 		coords[i] = e
 	}
-	// Parameter-identity scoping: no operand symbol may bind a mapped PID
-	// under a different display name, or differentiation would mistake one
-	// quantity for a chart coordinate. Runs before the first mint below,
-	// so it also covers checker recomputation and Laplacian stages, which
-	// all route through this function.
-	if err := CheckDisjointIdentity(store, field.CoordinateSystemRef, mapping, declaringFnRef,
-		append(append([]artifact.ArtifactRef{}, tn.ComponentRefs...), conn.CoefficientRefs...)); err != nil {
-		return fail(err)
-	}
 	// The derivative-slot index is a slot descriptor (COVARIANT over the
 	// chart space), minted deterministically so recomputation reproduces it.
 	diPayload, err := Index{Label: "d", Variance: VarianceCovariant, Space: &chart.SpaceRef}.Encode()
@@ -185,13 +182,6 @@ func resolveCovInputs(store Store, fieldRef, connRef artifact.ArtifactRef, mappi
 		coords: coords, declaring: declaringFnRef,
 		conds: normalizeConditionRefs(conds),
 	}, nil
-}
-
-// partialParam encodes the BPR+order parameters for one coordinate.
-func partialParam(mapping CoordParamMap, mu int) ([]byte, error) {
-	bpr := mapping.Entries[mu]
-	out := append(bpr.Encode(), artifact.EncodeUInt32(1)...)
-	return out, nil
 }
 
 // covResult is one computed result component with its evidence refs.
@@ -223,35 +213,21 @@ func evalCovCore(store Store, in *covInputs, mapping CoordParamMap) ([]covResult
 	for mu := 0; mu < in.dim; mu++ {
 		partials[mu] = make([]artifact.ArtifactRef, nIn)
 		partialExprs[mu] = make([]Expr, nIn)
-		params, err := partialParam(mapping, mu)
-		if err != nil {
-			return fail(err)
-		}
 		for c := 0; c < nIn; c++ {
-			res, err := Apply(store, Invocation{
-				ProducerNamespace: NamespacePhysMath, RuleID: RuleDifferentiate,
-				InputRefs:     []artifact.ArtifactRef{in.tensor.ComponentRefs[c], in.declaring},
-				ConditionRefs: in.conds,
-				Parameters:    params,
-			})
+			outRef, recordRef, pd, err := DifferentiateCoordinate(store,
+				in.tensor.ComponentRefs[c], in.chartRef, uint32(mu), mapping, in.declaring, 1, in.conds)
 			if err != nil {
 				return fail(fmt.Errorf("physmath: covariant partial (%d,%d) failed: %w", mu, c, err))
 			}
-			e, err := resolveExpression(store, res.OutputRef)
+			e, err := resolveExpression(store, outRef)
 			if err != nil {
 				return fail(err)
 			}
-			partials[mu][c] = res.OutputRef
+			partials[mu][c] = outRef
 			partialExprs[mu][c] = e
-			premises = append(premises, in.tensor.ComponentRefs[c])
-			results = append(results, res.OutputRef)
-			steps = append(steps, DerivationStep{
-				Ordinal: 0, ProducerNamespace: NamespacePhysMath, RuleID: RuleDifferentiate,
-				InputRefs:     []artifact.ArtifactRef{in.tensor.ComponentRefs[c], in.declaring},
-				OutputRef:     res.OutputRef,
-				ConditionRefs: append([]artifact.ArtifactRef{}, in.conds...),
-				Parameters:    params,
-			})
+			premises = append(premises, in.tensor.ComponentRefs[c], recordRef)
+			results = append(results, outRef)
+			steps = append(steps, pd.Steps[0])
 		}
 	}
 	// Phase B: assembly per result component, derivative-major order.

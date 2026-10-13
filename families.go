@@ -53,6 +53,7 @@ func AllPhysMathFamilies() []FamilyID {
 		FamilySymmetricBilinear, FamilyContraction, FamilyDomain, FamilyIntegral,
 		FamilyVolumeDensity, FamilyContractionEvaluation, FamilyVariationReduction,
 		FamilyCoordinateSystem, FamilyTensorField, FamilyAffineConnection,
+		FamilyCoordinateDifferentiation, FamilyRiemannEvaluation,
 	}
 }
 
@@ -193,22 +194,55 @@ func validateRefGrammars(fields map[string]artifact.ArtifactRef) error {
 
 // Function declares parameters and references its body expression
 // (spec §10.1). Family physmath/function/1.
+//
+// ParamNames optionally records the authoritative display name for each
+// declared parameter, parallel to ParameterIDs. It exists so that
+// differentiation rules can verify that a symbol carrying the target PID
+// actually denotes the declared variable, rather than an unrelated
+// quantity that happens to share the bare PID value. Absent means no
+// display authority is recorded: decoding tolerates absence (legacy
+// payloads still parse and validate structurally), but trusted
+// differentiation entry points fail closed without it.
 type Function struct {
 	ParameterIDs []ParameterID // SEQUENCE, order is semantic
 	BodyRef      artifact.ArtifactRef
+	ParamNames   []string // optional trailing SEQUENCE, parallel to ParameterIDs
 }
 
 // Family returns FamilyFunction.
 func (Function) Family() FamilyID { return FamilyFunction }
 
-// Encode returns the canonical payload: Sequence(ParameterIDs) || BodyRef.
+// Encode returns the canonical payload: Sequence(ParameterIDs) || BodyRef
+// || optional Sequence(display names). The trailing sequence is present
+// exactly when ParamNames is non-empty; its absence preserves the legacy
+// byte layout.
 func (f Function) Encode() ([]byte, error) {
 	elems := make([][]byte, len(f.ParameterIDs))
 	for i, id := range f.ParameterIDs {
 		raw := id
 		elems[i] = raw[:]
 	}
-	return append(artifact.EncodeSequence(elems), f.BodyRef.Encode()...), nil
+	out := append(artifact.EncodeSequence(elems), f.BodyRef.Encode()...)
+	if len(f.ParamNames) == 0 {
+		return out, nil
+	}
+	if len(f.ParamNames) != len(f.ParameterIDs) {
+		return nil, fmt.Errorf("physmath: ParamNames %d != ParameterIDs %d", len(f.ParamNames), len(f.ParameterIDs))
+	}
+	for i, name := range f.ParamNames {
+		if name == "" {
+			return nil, fmt.Errorf("physmath: empty ParamNames[%d]", i)
+		}
+	}
+	nameElems := make([][]byte, len(f.ParamNames))
+	for i, name := range f.ParamNames {
+		enc, err := artifact.EncodeString(name)
+		if err != nil {
+			return nil, err
+		}
+		nameElems[i] = enc
+	}
+	return append(out, artifact.EncodeSequence(nameElems)...), nil
 }
 
 // Validate checks ordinal consistency (§8.3) and the BodyRef target family.
@@ -737,6 +771,11 @@ var premiseFamilies = []FamilyID{
 	FamilyVolumeDensity, FamilyContractionEvaluation, FamilyVariationReduction,
 	FamilyCoordinateSystem, FamilyTensorField, FamilyAffineConnection,
 	FamilyDomain, FamilyIntegral,
+	// Guarded coordinate-differentiation records (validated data; never
+	// step outputs; carried as derivation context by geometry evaluations):
+	FamilyCoordinateDifferentiation,
+	// Metric-derived Riemann records (validated data; never step outputs):
+	FamilyRiemannEvaluation,
 }
 
 // resultFamilies is the closed result family set (spec §12.3): premises minus
@@ -748,7 +787,7 @@ var resultFamilies = []FamilyID{
 	FamilyTensor, FamilyIndex, FamilySymmetricBilinear, FamilyContraction,
 	FamilyVolumeDensity, FamilyContractionEvaluation, FamilyVariationReduction,
 	FamilyCoordinateSystem, FamilyTensorField, FamilyAffineConnection,
-	FamilyDomain, FamilyIntegral,
+	FamilyDomain, FamilyIntegral, FamilyCoordinateDifferentiation, FamilyRiemannEvaluation,
 }
 
 // DerivationStep is inline data inside physmath/derivation/1 (spec §12.2). It has
