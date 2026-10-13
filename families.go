@@ -53,7 +53,7 @@ func AllPhysMathFamilies() []FamilyID {
 		FamilySymmetricBilinear, FamilyContraction, FamilyDomain, FamilyIntegral,
 		FamilyVolumeDensity, FamilyContractionEvaluation, FamilyVariationReduction,
 		FamilyCoordinateSystem, FamilyTensorField, FamilyAffineConnection,
-		FamilyCoordinateDifferentiation,
+		FamilyCoordinateDifferentiation, FamilyRiemannEvaluation,
 	}
 }
 
@@ -774,6 +774,8 @@ var premiseFamilies = []FamilyID{
 	// Guarded coordinate-differentiation records (validated data; never
 	// step outputs; carried as derivation context by geometry evaluations):
 	FamilyCoordinateDifferentiation,
+	// Metric-derived Riemann records (validated data; never step outputs):
+	FamilyRiemannEvaluation,
 }
 
 // resultFamilies is the closed result family set (spec §12.3): premises minus
@@ -785,7 +787,7 @@ var resultFamilies = []FamilyID{
 	FamilyTensor, FamilyIndex, FamilySymmetricBilinear, FamilyContraction,
 	FamilyVolumeDensity, FamilyContractionEvaluation, FamilyVariationReduction,
 	FamilyCoordinateSystem, FamilyTensorField, FamilyAffineConnection,
-	FamilyDomain, FamilyIntegral, FamilyCoordinateDifferentiation,
+	FamilyDomain, FamilyIntegral, FamilyCoordinateDifferentiation, FamilyRiemannEvaluation,
 }
 
 // DerivationStep is inline data inside physmath/derivation/1 (spec §12.2). It has

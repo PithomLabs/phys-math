@@ -21,9 +21,9 @@ func refFamily(ns, typ string) FamilyID { return FamilyID{ns, typ, "1"} }
 
 func TestRegistryCompleteness(t *testing.T) {
 	fams := AllPhysMathFamilies()
-	// Plan 1.14 grows the registry 26 -> 27 (guarded coordinate_differentiation/1 record; no new executable rule).
-	if len(fams) != 27 {
-		t.Fatalf("registry has %d families, want 27", len(fams))
+	// Plan 1.15 grows the registry 27 -> 28 (metric-derived riemann_evaluation/1 record; no new executable rule).
+	if len(fams) != 28 {
+		t.Fatalf("registry has %d families, want 28", len(fams))
 	}
 	seen := map[FamilyID]bool{}
 	for _, f := range fams {
