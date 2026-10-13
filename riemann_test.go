@@ -922,3 +922,919 @@ func exprRefOf(t *testing.T, s Store) artifact.ArtifactRef {
 	t.Helper()
 	return mustStoreExpr(t, s, MustRational(1, 1))
 }
+
+// TestRiemannContractionPolarFlat pins the polar Ricci golden: R_rr and
+// R_thth reuse the Riemann factored blocks (program-verified child
+// multisets: Q0 matches R[10], Q3 matches R[5]+R[15]), R_rth = R_thr = 0/1.
+// Point values: every component 0 at r=1 and r=2.
+func TestRiemannContractionPolarFlat(t *testing.T) {
+	s := NewMemStore()
+	chart, metric, fn, mapping, r, _, cond := polarSetup(t, s)
+	conds := []artifact.ArtifactRef{cond}
+	_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, conds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, recRef, _, err := EvaluateRiemannContraction(s, riemRec)
+	if err != nil {
+		t.Fatalf("polar contraction failed: %v", err)
+	}
+	comps := riemannContractionComps(t, s, result)
+	if len(comps) != 4 {
+		t.Fatalf("polar contraction has %d components, want 4", len(comps))
+	}
+	zero := MustRational(0, 1)
+	for _, i := range []int{1, 2} {
+		if !comps[i].Equal(zero) {
+			t.Fatalf("polar Ricci[%d] is not exactly zero:\n%s", i, showExpr(comps[i]))
+		}
+	}
+	half, two := MustRational(1, 2), MustRational(2, 1)
+	negOne := MustRational(-1, 1)
+	r2, r2i, r2i2, n2r := polarAtoms(r)
+	// Q0 = R_rr = R[10]-form: -(U1+U2) - U3 (single surviving summand).
+	u1 := Mul(half, two, cloneExpr(r2i))
+	u2 := Mul(r, r, half, two, two, negOne, cloneExpr(r2i2))
+	u3 := Mul(r, r, half, half, two, two, cloneExpr(r2i), cloneExpr(r2i))
+	want0, err := Canonicalize(Add(Neg(Add(cloneExpr(u1), cloneExpr(u2))), Neg(cloneExpr(u3))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Canonicalize(comps[0]); err != nil || !got.Equal(want0) {
+		t.Fatalf("polar Ricci[0] is not the hand-derived form:\n%s", showExpr(comps[0]))
+	}
+	// Q3 = R_thth = R[5]-form + R[15]-form: T1+T2+T3 - W + W - W.
+	t1 := Mul(half, MustRational(-2, 1), cloneExpr(r2), cloneExpr(r2i))
+	t2 := Mul(r, half, two, cloneExpr(n2r), cloneExpr(r2i))
+	t3 := Mul(r, half, two, negOne, cloneExpr(n2r), cloneExpr(r2), cloneExpr(r2i2))
+	w := Mul(r, half, half, two, cloneExpr(n2r), cloneExpr(r2), cloneExpr(r2i), cloneExpr(r2i))
+	want3, err := Canonicalize(Add(t1, t2, t3, cloneExpr(w), Neg(cloneExpr(w)), Neg(cloneExpr(w))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Canonicalize(comps[3]); err != nil || !got.Equal(want3) {
+		t.Fatalf("polar Ricci[3] is not the hand-derived form:\n%s", showExpr(comps[3]))
+	}
+	// Result contract: rank 2, both slots covariant over the chart space.
+	assertContractionShape(t, s, result, chart, 2)
+	if err := CheckRiemannContraction(s, recRef); err != nil {
+		t.Fatalf("polar contraction rejected by Check: %v", err)
+	}
+	if err := ReplayRiemannContraction(s, recRef); err != nil {
+		t.Fatalf("polar contraction rejected by artifact replay: %v", err)
+	}
+}
+
+// riemannContractionComps resolves the ordered Ricci components.
+func riemannContractionComps(t *testing.T, s Store, resultField artifact.ArtifactRef) []Expr {
+	t.Helper()
+	_, fpayload, err := s.Lookup(resultField)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rf, err := DecodeTensorField(fpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, tpayload, err := s.Lookup(rf.TensorRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := DecodeTensor(tpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	comps := make([]Expr, len(rt.ComponentRefs))
+	for i, r := range rt.ComponentRefs {
+		comps[i] = mustResolve(t, s, r)
+	}
+	return comps
+}
+
+// assertContractionShape verifies rank, dimension, chart, slot variance and
+// space of a Ricci result field.
+func assertContractionShape(t *testing.T, s Store, resultField, chart artifact.ArtifactRef, dim int) {
+	t.Helper()
+	_, fpayload, err := s.Lookup(resultField)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rf, err := DecodeTensorField(fpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rf.CoordinateSystemRef != chart {
+		t.Fatal("contraction result chart not preserved")
+	}
+	_, tpayload, err := s.Lookup(rf.TensorRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := DecodeTensor(tpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int(rt.Rank) != 2 || int(rt.Dimension) != dim || len(rt.ComponentRefs) != dim*dim {
+		t.Fatalf("contraction result shape wrong: rank %d dim %d comps %d", rt.Rank, rt.Dimension, len(rt.ComponentRefs))
+	}
+	_, cpayload, err := s.Lookup(chart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs, err := DecodeCoordinateSystem(cpayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.IndexRefs) != 2 {
+		t.Fatal("contraction result index count wrong")
+	}
+	for i, r := range rt.IndexRefs {
+		idx, err := resolveIndex(s, "test slot", r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if idx.Variance != VarianceCovariant {
+			t.Fatalf("contraction slot %d variance wrong", i)
+		}
+		if idx.Space == nil || *idx.Space != cs.SpaceRef {
+			t.Fatalf("contraction slot %d space mismatch", i)
+		}
+	}
+}
+
+// TestRiemannScalarPolarFlat pins the polar scalar golden: R = g^rr R_rr +
+// g^thth R_thth with g^rr = r^2.(r^2)^-1 (adjugate form, never collapsed to
+// 1) and g^thth = (r^2)^-1. Both Ricci factors are zero-valued factored
+// forms (point: r=1 and r=2 give 0), so the scalar is a factored zero. The
+// pairing of inverse components with Ricci components in (sigma,nu) order is
+// what this golden locks; the curved golden proves nonzero closure.
+func TestRiemannScalarPolarFlat(t *testing.T) {
+	s := NewMemStore()
+	chart, metric, fn, mapping, r, _, cond := polarSetup(t, s)
+	conds := []artifact.ArtifactRef{cond}
+	_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, conds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, crec, _, err := EvaluateRiemannContraction(s, riemRec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scalar, srec, _, err := EvaluateRiemannScalar(s, crec)
+	if err != nil {
+		t.Fatalf("polar scalar failed: %v", err)
+	}
+	got := mustResolve(t, s, scalar)
+	half, two := MustRational(1, 2), MustRational(2, 1)
+	negOne := MustRational(-1, 1)
+	r2, r2i, r2i2, n2r := polarAtoms(r)
+	u1 := Mul(half, two, cloneExpr(r2i))
+	u2 := Mul(r, r, half, two, two, negOne, cloneExpr(r2i2))
+	u3 := Mul(r, r, half, half, two, two, cloneExpr(r2i), cloneExpr(r2i))
+	q0 := Add(Neg(Add(cloneExpr(u1), cloneExpr(u2))), Neg(cloneExpr(u3)))
+	t1 := Mul(half, MustRational(-2, 1), cloneExpr(r2), cloneExpr(r2i))
+	t2 := Mul(r, half, two, cloneExpr(n2r), cloneExpr(r2i))
+	t3 := Mul(r, half, two, negOne, cloneExpr(n2r), cloneExpr(r2), cloneExpr(r2i2))
+	w := Mul(r, half, half, two, cloneExpr(n2r), cloneExpr(r2), cloneExpr(r2i), cloneExpr(r2i))
+	q3 := Add(t1, t2, t3, cloneExpr(w), Neg(cloneExpr(w)), Neg(cloneExpr(w)))
+	grr := Mul(cloneExpr(r2), cloneExpr(r2i))
+	gtt := cloneExpr(r2i)
+	want, err := Canonicalize(Add(Mul(cloneExpr(grr), q0), Mul(cloneExpr(gtt), q3)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCanon, err := Canonicalize(got); err != nil || !gotCanon.Equal(want) {
+		t.Fatalf("polar scalar is not the hand-derived form:\n%s", showExpr(got))
+	}
+	// Determinant evidence pins to (r^2)-form: anchors the K-style quotient.
+	rec := scalarRecord(t, s, srec)
+	detWant, err := Canonicalize(Pow(r, MustRational(2, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detGot, err := Canonicalize(mustResolve(t, s, rec.DetRef)); err != nil || !detGot.Equal(detWant) {
+		t.Fatalf("polar determinant is not (r^2)-form:\n%s", showExpr(mustResolve(t, s, rec.DetRef)))
+	}
+	if err := CheckRiemannScalar(s, srec); err != nil {
+		t.Fatalf("polar scalar rejected by Check: %v", err)
+	}
+	if err := ReplayRiemannScalar(s, srec); err != nil {
+		t.Fatalf("polar scalar rejected by artifact replay: %v", err)
+	}
+}
+
+// scalarRecord resolves a riemann_scalar/1 record for inspection.
+func scalarRecord(t *testing.T, s Store, ref artifact.ArtifactRef) RiemannScalarEvaluation {
+	t.Helper()
+	fam, payload, err := s.Lookup(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fam != FamilyRiemannScalar {
+		t.Fatalf("record is %s/%s, not riemann_scalar/1", fam.Namespace, fam.ArtifactType)
+	}
+	rec, err := DecodeRiemannScalarEvaluation(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec
+}
+
+// TestRiemannContractionCurvedPoly pins the decisive nonzero Ricci golden for
+// ds^2 = dx^2 + (1+x^2)^2 dy^2 with f = 1+x^2, F = f^2. Hand derivation:
+// R_xx = -2/f (point: x=0 -> -2, x=1 -> -1, x=2 -> -2/5),
+// R_yy = -2f (point: x=0 -> -2, x=1 -> -4, x=2 -> -10),
+// R_xy = R_yx = 0/1 exactly. An always-zero implementation fails these pins.
+func TestRiemannContractionCurvedPoly(t *testing.T) {
+	s := NewMemStore()
+	chart, metric, fn, mapping, x, _, cond := curvedSetup(t, s)
+	conds := []artifact.ArtifactRef{cond}
+	_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, conds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, recRef, _, err := EvaluateRiemannContraction(s, riemRec)
+	if err != nil {
+		t.Fatalf("curved contraction failed: %v", err)
+	}
+	comps := riemannContractionComps(t, s, result)
+	if len(comps) != 4 {
+		t.Fatalf("curved contraction has %d components, want 4", len(comps))
+	}
+	zero := MustRational(0, 1)
+	for _, i := range []int{1, 2} {
+		if !comps[i].Equal(zero) {
+			t.Fatalf("curved Ricci[%d] is not exactly zero:\n%s", i, showExpr(comps[i]))
+		}
+	}
+	half, two := MustRational(1, 2), MustRational(2, 1)
+	negOne := MustRational(-1, 1)
+	f := Add(MustRational(1, 1), Pow(x, MustRational(2, 1)))
+	bigF := Pow(cloneExpr(f), MustRational(2, 1))
+	bigFi := Pow(cloneExpr(bigF), MustRational(-1, 1))
+	bigFi2 := Pow(cloneExpr(bigF), MustRational(-2, 1))
+	negFlat := Neg(Mul(x, two, two, cloneExpr(f)))
+	// Q0 = R_xx: -(A+B) - C with A = d(f)-form leg, B = d(F^-1)-form leg,
+	// C = squared-connection leg. Point: x=0 -> -(2+0)-0 = -2.
+	aInner := Add(Mul(two, two, cloneExpr(f)), Mul(x, x, two, two, two))
+	a := Mul(half, cloneExpr(aInner), cloneExpr(bigFi))
+	b := Mul(x, x, half, two, two, two, two, negOne, cloneExpr(f), cloneExpr(f), cloneExpr(bigFi2))
+	c := Mul(x, x, half, half, two, two, two, two, cloneExpr(f), cloneExpr(f), cloneExpr(bigFi), cloneExpr(bigFi))
+	_ = negFlat
+	want0, err := Canonicalize(Add(Neg(Add(cloneExpr(a), cloneExpr(b))), Neg(cloneExpr(c))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Canonicalize(comps[0]); err != nil || !got.Equal(want0) {
+		t.Fatalf("curved Ricci[0] is not the hand-derived -2/(1+x^2) form:\n%s", showExpr(comps[0]))
+	}
+	if comps[0].Equal(zero) {
+		t.Fatal("curved Ricci[0] collapsed to zero: nonzero golden lost")
+	}
+	// Q3 = R_yy: N1+N2+N3 + V - V - V = -2f mathematically.
+	// Point: x=0 -> -2; x=1 -> -8-8+8-4+4+4 = -4; x=2 -> -26-32+32-16+16+16 = -10.
+	n1 := Mul(half, Neg(Add(Mul(two, two, cloneExpr(f)), Mul(x, x, two, two, two))), cloneExpr(bigF), cloneExpr(bigFi))
+	n2 := Mul(x, half, two, two, cloneExpr(f), Neg(Mul(x, two, two, cloneExpr(f))), cloneExpr(bigFi))
+	n3 := Mul(x, half, two, two, negOne, cloneExpr(f), Neg(Mul(x, two, two, cloneExpr(f))), cloneExpr(bigF), cloneExpr(bigFi2))
+	v := Mul(x, half, half, two, two, cloneExpr(f), Neg(Mul(x, two, two, cloneExpr(f))), cloneExpr(bigF), cloneExpr(bigFi), cloneExpr(bigFi))
+	want3, err := Canonicalize(Add(n1, n2, n3, cloneExpr(v), Neg(cloneExpr(v)), Neg(cloneExpr(v))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Canonicalize(comps[3]); err != nil || !got.Equal(want3) {
+		t.Fatalf("curved Ricci[3] is not the hand-derived -2(1+x^2) form:\n%s", showExpr(comps[3]))
+	}
+	if comps[3].Equal(zero) {
+		t.Fatal("curved Ricci[3] collapsed to zero: nonzero golden lost")
+	}
+	assertContractionShape(t, s, result, chart, 2)
+	if err := CheckRiemannContraction(s, recRef); err != nil {
+		t.Fatalf("curved contraction rejected by Check: %v", err)
+	}
+	if err := ReplayRiemannContraction(s, recRef); err != nil {
+		t.Fatalf("curved contraction rejected by artifact replay: %v", err)
+	}
+}
+
+// TestRiemannScalarCurvedPoly pins R = g^xx R_xx + g^yy R_yy = -4/(1+x^2):
+// point x=0 -> -2 + 1.(-2) = -4; x=1 -> -1 + (1/4)(-4) = -2; x=2 ->
+// -2/5 + (1/25)(-10) = -4/5. The inverse blocks g^xx = F.(F^-1) (adjugate
+// form, never collapsed to 1) and g^yy = (F^-1) are pinned as stored.
+func TestRiemannScalarCurvedPoly(t *testing.T) {
+	s := NewMemStore()
+	chart, metric, fn, mapping, x, _, cond := curvedSetup(t, s)
+	conds := []artifact.ArtifactRef{cond}
+	_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, conds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, crec, _, err := EvaluateRiemannContraction(s, riemRec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scalar, srec, _, err := EvaluateRiemannScalar(s, crec)
+	if err != nil {
+		t.Fatalf("curved scalar failed: %v", err)
+	}
+	got := mustResolve(t, s, scalar)
+	half, two := MustRational(1, 2), MustRational(2, 1)
+	negOne := MustRational(-1, 1)
+	f := Add(MustRational(1, 1), Pow(x, MustRational(2, 1)))
+	bigF := Pow(cloneExpr(f), MustRational(2, 1))
+	bigFi := Pow(cloneExpr(bigF), MustRational(-1, 1))
+	bigFi2 := Pow(cloneExpr(bigF), MustRational(-2, 1))
+	// Ricci blocks, identical math to the contraction golden.
+	aInner := Add(Mul(two, two, cloneExpr(f)), Mul(x, x, two, two, two))
+	a := Mul(half, cloneExpr(aInner), cloneExpr(bigFi))
+	b := Mul(x, x, half, two, two, two, two, negOne, cloneExpr(f), cloneExpr(f), cloneExpr(bigFi2))
+	c := Mul(x, x, half, half, two, two, two, two, cloneExpr(f), cloneExpr(f), cloneExpr(bigFi), cloneExpr(bigFi))
+	q0 := Add(Neg(Add(cloneExpr(a), cloneExpr(b))), Neg(cloneExpr(c)))
+	n1 := Mul(half, Neg(Add(Mul(two, two, cloneExpr(f)), Mul(x, x, two, two, two))), cloneExpr(bigF), cloneExpr(bigFi))
+	n2 := Mul(x, half, two, two, cloneExpr(f), Neg(Mul(x, two, two, cloneExpr(f))), cloneExpr(bigFi))
+	n3 := Mul(x, half, two, two, negOne, cloneExpr(f), Neg(Mul(x, two, two, cloneExpr(f))), cloneExpr(bigF), cloneExpr(bigFi2))
+	v := Mul(x, half, half, two, two, cloneExpr(f), Neg(Mul(x, two, two, cloneExpr(f))), cloneExpr(bigF), cloneExpr(bigFi), cloneExpr(bigFi))
+	q3 := Add(n1, n2, n3, cloneExpr(v), Neg(cloneExpr(v)), Neg(cloneExpr(v)))
+	gxx := Mul(cloneExpr(bigF), cloneExpr(bigFi))
+	gyy := cloneExpr(bigFi)
+	want, err := Canonicalize(Add(Mul(cloneExpr(gxx), q0), Mul(cloneExpr(gyy), q3)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCanon, err := Canonicalize(got); err != nil || !gotCanon.Equal(want) {
+		t.Fatalf("curved scalar is not the hand-derived -4/(1+x^2) form:\n%s", showExpr(got))
+	}
+	if got.Equal(MustRational(0, 1)) {
+		t.Fatal("curved scalar collapsed to zero: nonzero golden lost")
+	}
+	// Determinant evidence pins to F = (1+x^2)^2: anchors K = R/det by hand.
+	rec := scalarRecord(t, s, srec)
+	detWant, err := Canonicalize(Pow(cloneExpr(f), MustRational(2, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detGot, err := Canonicalize(mustResolve(t, s, rec.DetRef)); err != nil || !detGot.Equal(detWant) {
+		t.Fatalf("curved determinant is not (1+x^2)^2-form:\n%s", showExpr(mustResolve(t, s, rec.DetRef)))
+	}
+	if err := CheckRiemannScalar(s, srec); err != nil {
+		t.Fatalf("curved scalar rejected by Check: %v", err)
+	}
+	if err := ReplayRiemannScalar(s, srec); err != nil {
+		t.Fatalf("curved scalar rejected by artifact replay: %v", err)
+	}
+}
+
+// TestRiemannContractionOneDim pins the 1D Ricci golden: the single component
+// is the Riemann P-P+Q-Q mirror form with A = d(1)-form leg, B = d(f')-form
+// leg, C = squared-connection leg, Dd = the differentiated (1+x^2) factor.
+// Point: x=0 -> (1+0)-(1+0)+0-0 = 0; x=1 -> (1/2-1/2)-(1/2-1/2)+1/16-1/16 = 0.
+func TestRiemannContractionOneDim(t *testing.T) {
+	s := NewMemStore()
+	chart, metric, fn, mapping, x, cond := oneDimSetup(t, s)
+	conds := []artifact.ArtifactRef{cond}
+	_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, conds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, recRef, _, err := EvaluateRiemannContraction(s, riemRec)
+	if err != nil {
+		t.Fatalf("one-dim contraction failed: %v", err)
+	}
+	comps := riemannContractionComps(t, s, result)
+	if len(comps) != 1 {
+		t.Fatalf("one-dim contraction has %d components, want 1", len(comps))
+	}
+	half, two := MustRational(1, 2), MustRational(2, 1)
+	negOne := MustRational(-1, 1)
+	twoX := Mul(x, two)
+	fp := Add(MustRational(1, 1), Pow(x, MustRational(2, 1)))
+	fpi := Pow(cloneExpr(fp), MustRational(-1, 1))
+	fpi2 := Pow(cloneExpr(fp), MustRational(-2, 1))
+	dd := Add(cloneExpr(twoX), cloneExpr(twoX), Neg(cloneExpr(twoX)))
+	a := Mul(half, two, cloneExpr(fpi))
+	b := Mul(half, negOne, cloneExpr(twoX), cloneExpr(dd), cloneExpr(fpi2))
+	c := Mul(half, half, cloneExpr(dd), cloneExpr(dd), cloneExpr(fpi), cloneExpr(fpi))
+	want, err := Canonicalize(Add(a, b, c, Neg(Add(cloneExpr(a), cloneExpr(b))), Neg(cloneExpr(c))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Canonicalize(comps[0]); err != nil || !got.Equal(want) {
+		t.Fatalf("one-dim Ricci[0] is not the hand-derived form:\n%s", showExpr(comps[0]))
+	}
+	assertNegMirrored(t, comps[0])
+	assertContractionShape(t, s, result, chart, 1)
+	if err := CheckRiemannContraction(s, recRef); err != nil {
+		t.Fatalf("one-dim contraction rejected by Check: %v", err)
+	}
+	if err := ReplayRiemannContraction(s, recRef); err != nil {
+		t.Fatalf("one-dim contraction rejected by artifact replay: %v", err)
+	}
+}
+
+// TestRiemannScalarOneDim pins the 1D scalar golden: R = g^xx R_xx with
+// g^xx = (1+x^2)^-1 in adjugate form. Point: x=0 -> 0.1 = 0; x=1 -> 0.1/2 = 0.
+func TestRiemannScalarOneDim(t *testing.T) {
+	s := NewMemStore()
+	chart, metric, fn, mapping, x, cond := oneDimSetup(t, s)
+	conds := []artifact.ArtifactRef{cond}
+	_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, conds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, crec, _, err := EvaluateRiemannContraction(s, riemRec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scalar, srec, _, err := EvaluateRiemannScalar(s, crec)
+	if err != nil {
+		t.Fatalf("one-dim scalar failed: %v", err)
+	}
+	got := mustResolve(t, s, scalar)
+	half, two := MustRational(1, 2), MustRational(2, 1)
+	negOne := MustRational(-1, 1)
+	twoX := Mul(x, two)
+	fp := Add(MustRational(1, 1), Pow(x, MustRational(2, 1)))
+	fpi := Pow(cloneExpr(fp), MustRational(-1, 1))
+	fpi2 := Pow(cloneExpr(fp), MustRational(-2, 1))
+	dd := Add(cloneExpr(twoX), cloneExpr(twoX), Neg(cloneExpr(twoX)))
+	a := Mul(half, two, cloneExpr(fpi))
+	b := Mul(half, negOne, cloneExpr(twoX), cloneExpr(dd), cloneExpr(fpi2))
+	c := Mul(half, half, cloneExpr(dd), cloneExpr(dd), cloneExpr(fpi), cloneExpr(fpi))
+	q0 := Add(a, b, c, Neg(Add(cloneExpr(a), cloneExpr(b))), Neg(cloneExpr(c)))
+	want, err := Canonicalize(Mul(q0, cloneExpr(fpi)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCanon, err := Canonicalize(got); err != nil || !gotCanon.Equal(want) {
+		t.Fatalf("one-dim scalar is not the hand-derived form:\n%s", showExpr(got))
+	}
+	if err := CheckRiemannScalar(s, srec); err != nil {
+		t.Fatalf("one-dim scalar rejected by Check: %v", err)
+	}
+	if err := ReplayRiemannScalar(s, srec); err != nil {
+		t.Fatalf("one-dim scalar rejected by artifact replay: %v", err)
+	}
+}
+
+// tamperContractionRecord decodes a contraction record, applies mutate, and
+// re-mints it as a new artifact.
+func tamperContractionRecord(t *testing.T, s Store, ref artifact.ArtifactRef, mutate func(*RiemannContractionEvaluation)) artifact.ArtifactRef {
+	t.Helper()
+	fam, payload, err := s.Lookup(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fam != FamilyRiemannContraction {
+		t.Fatalf("record is %s/%s, not riemann_contraction/1", fam.Namespace, fam.ArtifactType)
+	}
+	rec, err := DecodeRiemannContractionEvaluation(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(&rec)
+	raw, err := rec.Encode()
+	if err != nil {
+		t.Fatalf("tampered record does not encode: %v", err)
+	}
+	bad, err := s.Put(FamilyRiemannContraction, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bad
+}
+
+// tamperScalarRecord decodes a scalar record, applies mutate, and re-mints it.
+func tamperScalarRecord(t *testing.T, s Store, ref artifact.ArtifactRef, mutate func(*RiemannScalarEvaluation)) artifact.ArtifactRef {
+	t.Helper()
+	fam, payload, err := s.Lookup(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fam != FamilyRiemannScalar {
+		t.Fatalf("record is %s/%s, not riemann_scalar/1", fam.Namespace, fam.ArtifactType)
+	}
+	rec, err := DecodeRiemannScalarEvaluation(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(&rec)
+	raw, err := rec.Encode()
+	if err != nil {
+		t.Fatalf("tampered record does not encode: %v", err)
+	}
+	bad, err := s.Put(FamilyRiemannScalar, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bad
+}
+
+// TestRiemannContractionAdversarial proves corrupted contraction evidence
+// fails Check and artifact Replay at the intended boundary.
+func TestRiemannContractionAdversarial(t *testing.T) {
+	mk := func(t *testing.T) (*MemStore, artifact.ArtifactRef, RiemannContractionEvaluation) {
+		s := NewMemStore()
+		chart, metric, fn, mapping, _, _, cond := polarSetup(t, s)
+		_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, []artifact.ArtifactRef{cond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, recRef, _, err := EvaluateRiemannContraction(s, riemRec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s, recRef, riemannContractionRecord(t, s, recRef)
+	}
+	bothFail := func(t *testing.T, s *MemStore, bad artifact.ArtifactRef, reason string) {
+		t.Helper()
+		if err := CheckRiemannContraction(s, bad); err == nil {
+			t.Fatal("corrupted record accepted by Check")
+		} else if !strings.Contains(err.Error(), reason) {
+			t.Fatalf("Check wrong boundary (want %q): %v", reason, err)
+		}
+		if err := ReplayRiemannContraction(s, bad); err == nil {
+			t.Fatal("corrupted record accepted by artifact replay")
+		} else if !strings.Contains(err.Error(), reason) {
+			t.Fatalf("replay wrong boundary (want %q): %v", reason, err)
+		}
+	}
+
+	t.Run("substituted-riemann-source", func(t *testing.T) {
+		s, recRef, _ := mk(t)
+		// A foreign Riemann record whose dependencies do not resolve here
+		// fails closed at the availability boundary.
+		s2 := NewMemStore()
+		c2, m2, f2, mp2, _, _, cd2 := curvedSetup(t, s2)
+		_, rr2, _, err := EvaluateRiemann(s2, m2, c2, mp2, f2, []artifact.ArtifactRef{cd2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, rp, err := s2.Lookup(rr2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rrCopy, err := s.Put(FamilyRiemannEvaluation, rp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ghost := tamperContractionRecord(t, s, recRef, func(r *RiemannContractionEvaluation) { r.RiemannRef = rrCopy })
+		bothFail(t, s, ghost, "unresolvable")
+		// A fully resolvable Riemann record for a DIFFERENT metric on the
+		// same chart reaches the component gate: recomputation from the
+		// substituted result no longer matches the stored contraction.
+		_, cpayload, err := s.Lookup(recRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		crec, err := DecodeRiemannContractionEvaluation(cpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, rpayload, err := s.Lookup(crec.RiemannRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rrec, err := DecodeRiemannEvaluation(rpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		one := mustStoreExpr(t, s, MustRational(1, 1))
+		zero := mustStoreExpr(t, s, MustRational(0, 1))
+		flat, err := s.Put(FamilySymmetricBilinear, SymmetricBilinear{
+			Dimension: 2, ComponentRefs: []artifact.ArtifactRef{one, zero, zero, one},
+		}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		flatCond := detCond(t, s, mustFlatDet(t, s, flat))
+		_, flatRiem, _, err := EvaluateRiemann(s, flat, rrec.ChartRef, rrec.Mapping, rrec.DeclaringFnRef, []artifact.ArtifactRef{flatCond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := tamperContractionRecord(t, s, recRef, func(r *RiemannContractionEvaluation) { r.RiemannRef = flatRiem })
+		bothFail(t, s, bad, "mismatch")
+	})
+
+	t.Run("substituted-result-reordered", func(t *testing.T) {
+		s, recRef, rec := mk(t)
+		_, fpayload, err := s.Lookup(rec.ResultRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rf, err := DecodeTensorField(fpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, tpayload, err := s.Lookup(rf.TensorRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rt, err := DecodeTensor(tpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Swap two component references: reordered result evidence.
+		swapped := append([]artifact.ArtifactRef{}, rt.ComponentRefs...)
+		swapped[0], swapped[3] = swapped[3], swapped[0]
+		badTensor, err := s.Put(FamilyTensor, Tensor{Rank: 2, Dimension: 2, IndexRefs: rt.IndexRefs, ComponentRefs: swapped}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		badField, err := s.Put(FamilyTensorField, TensorField{TensorRef: badTensor, CoordinateSystemRef: rf.CoordinateSystemRef}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := tamperContractionRecord(t, s, recRef, func(r *RiemannContractionEvaluation) { r.ResultRef = badField })
+		bothFail(t, s, bad, "mismatch")
+	})
+
+	t.Run("substituted-derivation-chart", func(t *testing.T) {
+		s, recRef, _ := mk(t)
+		other := mustStoreExpr(t, s, MustRational(5, 1))
+		_ = other
+		ghostDeriv := ComputeTestRef(t, "physmath", "derivation/1")
+		bad := tamperContractionRecord(t, s, recRef, func(r *RiemannContractionEvaluation) { r.DerivationRef = ghostDeriv })
+		bothFail(t, s, bad, "unresolvable")
+		ghostChart := ComputeTestRef(t, "physmath", "coordinate_system/1")
+		badChart := tamperContractionRecord(t, s, recRef, func(r *RiemannContractionEvaluation) { r.ChartRef = ghostChart })
+		bothFail(t, s, badChart, "unresolvable")
+	})
+
+	t.Run("wrong-family-and-ghost", func(t *testing.T) {
+		s, _, _ := mk(t)
+		exprRef := mustStoreExpr(t, s, MustRational(1, 1))
+		if err := CheckRiemannContraction(s, exprRef); err == nil {
+			t.Fatal("expression target accepted as contraction record")
+		}
+		if err := ReplayRiemannContraction(s, exprRef); err == nil {
+			t.Fatal("expression target replayed as contraction record")
+		}
+		ghost := ComputeTestRef(t, "physmath", "riemann_contraction/1")
+		if err := CheckRiemannContraction(s, ghost); err == nil {
+			t.Fatal("unresolvable record accepted")
+		}
+	})
+
+	t.Run("tampered-assembly-output", func(t *testing.T) {
+		s, recRef, rec := mk(t)
+		_, dpayload, err := s.Lookup(rec.DerivationRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := DecodeDerivation(dpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		other := mustStoreExpr(t, s, MustRational(77, 1))
+		d.Steps[len(d.Steps)-1].OutputRef = other
+		draw, err := d.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		altDeriv, err := s.Put(FamilyDerivation, draw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := tamperContractionRecord(t, s, recRef, func(r *RiemannContractionEvaluation) { r.DerivationRef = altDeriv })
+		bothFail(t, s, bad, "mismatch")
+	})
+
+	t.Run("record-codec-gates", func(t *testing.T) {
+		s, recRef, rec := mk(t)
+		raw, err := rec.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DecodeRiemannContractionEvaluation(raw); err != nil {
+			t.Fatalf("record does not round-trip: %v", err)
+		}
+		if _, err := DecodeRiemannContractionEvaluation(raw[:len(raw)/2]); err == nil {
+			t.Fatal("truncated record accepted")
+		}
+		if _, err := DecodeRiemannContractionEvaluation(append(append([]byte{}, raw...), 0x00)); err == nil {
+			t.Fatal("trailing bytes accepted")
+		}
+		if err := CheckRiemannContraction(s, recRef); err != nil {
+			t.Fatalf("valid record rejected: %v", err)
+		}
+	})
+}
+
+// riemannContractionRecord resolves a riemann_contraction/1 record.
+func riemannContractionRecord(t *testing.T, s Store, ref artifact.ArtifactRef) RiemannContractionEvaluation {
+	t.Helper()
+	fam, payload, err := s.Lookup(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fam != FamilyRiemannContraction {
+		t.Fatalf("record is %s/%s, not riemann_contraction/1", fam.Namespace, fam.ArtifactType)
+	}
+	rec, err := DecodeRiemannContractionEvaluation(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec
+}
+
+// mustFlatDet returns the determinant reference of a stored metric.
+func mustFlatDet(t *testing.T, s Store, metric artifact.ArtifactRef) artifact.ArtifactRef {
+	t.Helper()
+	detRef, _, err := GeneralDeterminant(s, metric)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return detRef
+}
+
+// TestRiemannScalarAdversarial proves corrupted scalar evidence fails Check
+// and artifact Replay at the intended boundary, including the exact
+// condition-chain binding.
+func TestRiemannScalarAdversarial(t *testing.T) {
+	mk := func(t *testing.T) (*MemStore, artifact.ArtifactRef, RiemannScalarEvaluation) {
+		s := NewMemStore()
+		chart, metric, fn, mapping, _, _, cond := polarSetup(t, s)
+		_, riemRec, _, err := EvaluateRiemann(s, metric, chart, mapping, fn, []artifact.ArtifactRef{cond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, crec, _, err := EvaluateRiemannContraction(s, riemRec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, recRef, _, err := EvaluateRiemannScalar(s, crec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s, recRef, scalarRecord(t, s, recRef)
+	}
+	bothFail := func(t *testing.T, s *MemStore, bad artifact.ArtifactRef, reason string) {
+		t.Helper()
+		if err := CheckRiemannScalar(s, bad); err == nil {
+			t.Fatal("corrupted record accepted by Check")
+		} else if !strings.Contains(err.Error(), reason) {
+			t.Fatalf("Check wrong boundary (want %q): %v", reason, err)
+		}
+		if err := ReplayRiemannScalar(s, bad); err == nil {
+			t.Fatal("corrupted record accepted by artifact replay")
+		} else if !strings.Contains(err.Error(), reason) {
+			t.Fatalf("replay wrong boundary (want %q): %v", reason, err)
+		}
+	}
+
+	t.Run("substituted-contraction", func(t *testing.T) {
+		s, recRef, _ := mk(t)
+		s2 := NewMemStore()
+		c2, m2, f2, mp2, _, _, cd2 := curvedSetup(t, s2)
+		_, rr2, _, err := EvaluateRiemann(s2, m2, c2, mp2, f2, []artifact.ArtifactRef{cd2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, cr2, _, err := EvaluateRiemannContraction(s2, rr2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, rp, err := s2.Lookup(cr2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		crCopy, err := s.Put(FamilyRiemannContraction, rp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := tamperScalarRecord(t, s, recRef, func(r *RiemannScalarEvaluation) { r.ContractionRef = crCopy })
+		bothFail(t, s, bad, "unresolvable")
+	})
+
+	t.Run("substituted-metric-chain", func(t *testing.T) {
+		s, recRef, rec := mk(t)
+		one := mustStoreExpr(t, s, MustRational(1, 1))
+		zero := mustStoreExpr(t, s, MustRational(0, 1))
+		flat, err := s.Put(FamilySymmetricBilinear, SymmetricBilinear{
+			Dimension: 2, ComponentRefs: []artifact.ArtifactRef{one, zero, zero, one},
+		}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		flatDet, _, err := GeneralDeterminant(s, flat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		flatCond := detCond(t, s, flatDet)
+		bad := tamperScalarRecord(t, s, recRef, func(r *RiemannScalarEvaluation) {
+			r.MetricRef = flat
+			r.ConditionRefs = []artifact.ArtifactRef{flatCond}
+		})
+		_ = rec
+		// The chain-consistency gate fires first: the substituted metric
+		// is not the metric of the bound Riemann record.
+		bothFail(t, s, bad, "differs from riemann metric")
+	})
+
+	t.Run("substituted-det-inverse-evidence", func(t *testing.T) {
+		s, recRef, rec := mk(t)
+		other := mustStoreExpr(t, s, MustRational(11, 1))
+		badDet := tamperScalarRecord(t, s, recRef, func(r *RiemannScalarEvaluation) { r.DetRef = other })
+		bothFail(t, s, badDet, "mismatch")
+		// Inverse tensor with swapped components.
+		_, ipayload, err := s.Lookup(rec.InvTensorRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gt, err := DecodeTensor(ipayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		swapped := append([]artifact.ArtifactRef{}, gt.ComponentRefs...)
+		swapped[0], swapped[len(swapped)-1] = swapped[len(swapped)-1], swapped[0]
+		badInv, err := s.Put(FamilyTensor, Tensor{Rank: 2, Dimension: 2, IndexRefs: gt.IndexRefs, ComponentRefs: swapped}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := tamperScalarRecord(t, s, recRef, func(r *RiemannScalarEvaluation) { r.InvTensorRef = badInv })
+		bothFail(t, s, bad, "mismatch")
+		// Inverse derivation pointing at determinant evidence.
+		badDeriv := tamperScalarRecord(t, s, recRef, func(r *RiemannScalarEvaluation) {
+			r.InvDerivationRef = rec.DetDerivationRef
+		})
+		bothFail(t, s, badDeriv, "mismatch")
+	})
+
+	t.Run("substituted-conditions", func(t *testing.T) {
+		s, recRef, _ := mk(t)
+		empty := tamperScalarRecord(t, s, recRef, func(r *RiemannScalarEvaluation) { r.ConditionRefs = nil })
+		bothFail(t, s, empty, "condition")
+	})
+
+	t.Run("singular-metric-at-scalar", func(t *testing.T) {
+		s, recRef, _ := mk(t)
+		one := mustStoreExpr(t, s, MustRational(1, 1))
+		zero := mustStoreExpr(t, s, MustRational(0, 1))
+		sing, err := s.Put(FamilySymmetricBilinear, SymmetricBilinear{
+			Dimension: 2, ComponentRefs: []artifact.ArtifactRef{one, zero, zero, zero},
+		}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := tamperScalarRecord(t, s, recRef, func(r *RiemannScalarEvaluation) { r.MetricRef = sing })
+		bothFail(t, s, bad, "differs from riemann metric")
+	})
+
+	t.Run("substituted-result-tampered-step", func(t *testing.T) {
+		s, recRef, rec := mk(t)
+		other := mustStoreExpr(t, s, MustRational(13, 1))
+		bad := tamperScalarRecord(t, s, recRef, func(r *RiemannScalarEvaluation) { r.ResultRef = other })
+		bothFail(t, s, bad, "does not match")
+		_, dpayload, err := s.Lookup(rec.DerivationRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := DecodeDerivation(dpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Steps[len(d.Steps)-1].OutputRef = other
+		draw, err := d.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		altDeriv, err := s.Put(FamilyDerivation, draw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		badDeriv := tamperScalarRecord(t, s, recRef, func(r *RiemannScalarEvaluation) { r.DerivationRef = altDeriv })
+		bothFail(t, s, badDeriv, "does not match")
+	})
+
+	t.Run("wrong-family-ghost-codec", func(t *testing.T) {
+		s, _, rec := mk(t)
+		exprRef := mustStoreExpr(t, s, MustRational(1, 1))
+		if err := CheckRiemannScalar(s, exprRef); err == nil {
+			t.Fatal("expression target accepted as scalar record")
+		}
+		if err := ReplayRiemannScalar(s, exprRef); err == nil {
+			t.Fatal("expression target replayed as scalar record")
+		}
+		ghost := ComputeTestRef(t, "physmath", "riemann_scalar/1")
+		if err := CheckRiemannScalar(s, ghost); err == nil {
+			t.Fatal("unresolvable record accepted")
+		}
+		raw, err := rec.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DecodeRiemannScalarEvaluation(raw); err != nil {
+			t.Fatalf("record does not round-trip: %v", err)
+		}
+		if _, err := DecodeRiemannScalarEvaluation(raw[:len(raw)/2]); err == nil {
+			t.Fatal("truncated record accepted")
+		}
+		if _, err := DecodeRiemannScalarEvaluation(append(append([]byte{}, raw...), 0x00)); err == nil {
+			t.Fatal("trailing bytes accepted")
+		}
+		dup := rec
+		dup.ConditionRefs = []artifact.ArtifactRef{rec.ConditionRefs[0], rec.ConditionRefs[0]}
+		if err := dup.Validate(); err == nil {
+			t.Fatal("duplicate-condition record validated")
+		}
+	})
+}

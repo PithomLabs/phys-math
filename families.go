@@ -54,6 +54,7 @@ func AllPhysMathFamilies() []FamilyID {
 		FamilyVolumeDensity, FamilyContractionEvaluation, FamilyVariationReduction,
 		FamilyCoordinateSystem, FamilyTensorField, FamilyAffineConnection,
 		FamilyCoordinateDifferentiation, FamilyRiemannEvaluation,
+		FamilyRiemannContraction, FamilyRiemannScalar,
 	}
 }
 
@@ -776,6 +777,9 @@ var premiseFamilies = []FamilyID{
 	FamilyCoordinateDifferentiation,
 	// Metric-derived Riemann records (validated data; never step outputs):
 	FamilyRiemannEvaluation,
+	// Ricci-contraction and scalar records (validated data; never step
+	// outputs; carried as derivation context by curvature evaluations):
+	FamilyRiemannContraction, FamilyRiemannScalar,
 }
 
 // resultFamilies is the closed result family set (spec §12.3): premises minus
@@ -787,7 +791,7 @@ var resultFamilies = []FamilyID{
 	FamilyTensor, FamilyIndex, FamilySymmetricBilinear, FamilyContraction,
 	FamilyVolumeDensity, FamilyContractionEvaluation, FamilyVariationReduction,
 	FamilyCoordinateSystem, FamilyTensorField, FamilyAffineConnection,
-	FamilyDomain, FamilyIntegral, FamilyCoordinateDifferentiation, FamilyRiemannEvaluation,
+	FamilyDomain, FamilyIntegral, FamilyCoordinateDifferentiation, FamilyRiemannEvaluation, FamilyRiemannContraction, FamilyRiemannScalar,
 }
 
 // DerivationStep is inline data inside physmath/derivation/1 (spec §12.2). It has
