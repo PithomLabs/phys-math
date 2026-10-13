@@ -332,27 +332,35 @@ func DifferentiateCoordinate(store Store, sourceRef, chartRef artifact.ArtifactR
 	return res.OutputRef, recRef, d, nil
 }
 
-// CheckCoordinateDifferentiation is the store-aware provenance gate: family
-// resolution, record/derivation shape with exact linkage (single
-// DIFFERENTIATE-001 step consuming source and declaring function with the
-// mapped BPR and order), revalidation of the full chart binding and the
-// selected-coordinate leg from stored artifacts, and replay before trust.
-func CheckCoordinateDifferentiation(store Store, ref artifact.ArtifactRef) error {
+// resolveAndValidateCoordDiff resolves the stored coordinate_differentiation/1
+// record and its derivation and validates their complete agreement from stored
+// artifacts: family resolution, record/derivation shape with exact linkage
+// (single DIFFERENTIATE-001 step consuming source and declaring function with
+// the mapped BPR and order), revalidation of the full chart binding and the
+// selected-coordinate leg. It performs no replay itself; callers re-execute
+// exactly the validated derivation. Neither CheckCoordinateDifferentiation nor
+// ReplayCoordinateDifferentiation calls the other: both share this helper, so
+// the validation contract is written once and replay happens exactly once per
+// entry point.
+func resolveAndValidateCoordDiff(store Store, ref artifact.ArtifactRef) (CoordinateDifferentiation, Derivation, error) {
+	fail := func(err error) (CoordinateDifferentiation, Derivation, error) {
+		return CoordinateDifferentiation{}, Derivation{}, err
+	}
 	fam, payload, err := store.Lookup(ref)
 	if err != nil {
-		return fmt.Errorf("physmath: coord-diff record unresolvable: %w", err)
+		return fail(fmt.Errorf("physmath: coord-diff record unresolvable: %w", err))
 	}
 	if fam != FamilyCoordinateDifferentiation {
-		return fmt.Errorf("physmath: target is not coordinate_differentiation/1: %w", ErrBadInput)
+		return fail(fmt.Errorf("physmath: target is not coordinate_differentiation/1: %w", ErrBadInput))
 	}
 	rec, err := DecodeCoordinateDifferentiation(payload)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	for _, tc := range rec.TargetChecks() {
 		tfam, _, err := store.Lookup(tc.Ref)
 		if err != nil {
-			return fmt.Errorf("physmath: %s unresolvable: %w", tc.Field, err)
+			return fail(fmt.Errorf("physmath: %s unresolvable: %w", tc.Field, err))
 		}
 		ok := false
 		for _, a := range tc.Allowed {
@@ -362,64 +370,76 @@ func CheckCoordinateDifferentiation(store Store, ref artifact.ArtifactRef) error
 			}
 		}
 		if !ok {
-			return fmt.Errorf("physmath: %s targets %s/%s/%s, not in closed target set",
-				tc.Field, tfam.Namespace, tfam.ArtifactType, tfam.SchemaVersion)
+			return fail(fmt.Errorf("physmath: %s targets %s/%s/%s, not in closed target set",
+				tc.Field, tfam.Namespace, tfam.ArtifactType, tfam.SchemaVersion))
 		}
 	}
 	dfam, dpayload, err := store.Lookup(rec.DerivationRef)
 	if err != nil {
-		return fmt.Errorf("physmath: coord-diff derivation unresolvable: %w", err)
+		return fail(fmt.Errorf("physmath: coord-diff derivation unresolvable: %w", err))
 	}
 	if dfam != FamilyDerivation {
-		return fmt.Errorf("physmath: coord-diff derivation is not derivation/1: %w", ErrBadInput)
+		return fail(fmt.Errorf("physmath: coord-diff derivation is not derivation/1: %w", ErrBadInput))
 	}
 	d, err := DecodeDerivation(dpayload)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	if len(d.PremiseRefs) != 2 || len(d.ResultRefs) != 1 || len(d.Steps) != 1 {
-		return fmt.Errorf("physmath: coord-diff derivation must carry two premises, one step, one result")
+		return fail(fmt.Errorf("physmath: coord-diff derivation must carry two premises, one step, one result"))
 	}
 	if d.ResultRefs[0] != rec.ResultRef {
-		return fmt.Errorf("physmath: coord-diff derivation result does not match the record")
+		return fail(fmt.Errorf("physmath: coord-diff derivation result does not match the record"))
 	}
 	s := d.Steps[0]
 	if s.Ordinal != 0 || s.ProducerNamespace != NamespacePhysMath || s.RuleID != RuleDifferentiate {
-		return fmt.Errorf("physmath: coord-diff step must be ordinal-0 DIFFERENTIATE-001")
+		return fail(fmt.Errorf("physmath: coord-diff step must be ordinal-0 DIFFERENTIATE-001"))
 	}
 	if len(s.InputRefs) != 2 || s.InputRefs[0] != rec.SourceRef || s.InputRefs[1] != rec.DeclaringFnRef {
-		return fmt.Errorf("physmath: coord-diff step linkage broken")
+		return fail(fmt.Errorf("physmath: coord-diff step linkage broken"))
 	}
 	wantParams := coordDiffParams(rec.Mapping.Entries[rec.CoordIndex], rec.Order)
 	if string(s.Parameters) != string(wantParams) {
-		return fmt.Errorf("physmath: coord-diff step parameters mismatch the recorded selection")
+		return fail(fmt.Errorf("physmath: coord-diff step parameters mismatch the recorded selection"))
 	}
 	if !equalRefSets(s.ConditionRefs, rec.ConditionRefs) {
-		return fmt.Errorf("physmath: coord-diff condition sets differ from the record")
+		return fail(fmt.Errorf("physmath: coord-diff condition sets differ from the record"))
 	}
 	if s.OutputRef != rec.ResultRef {
-		return fmt.Errorf("physmath: coord-diff step output does not match the record")
+		return fail(fmt.Errorf("physmath: coord-diff step output does not match the record"))
 	}
 	// Index well-formedness before the shared binding revalidation.
 	if uint64(rec.CoordIndex) >= uint64(len(rec.Mapping.Entries)) {
-		return fmt.Errorf("physmath: coord-diff index %d out of mapping range: %w", rec.CoordIndex, ErrBadInput)
+		return fail(fmt.Errorf("physmath: coord-diff index %d out of mapping range: %w", rec.CoordIndex, ErrBadInput))
 	}
 	if err := ValidateCoordBinding(store, rec.ChartRef, rec.Mapping, rec.DeclaringFnRef, []artifact.ArtifactRef{rec.SourceRef}); err != nil {
-		return err
+		return fail(err)
 	}
 	_, cpayload, err := store.Lookup(rec.ChartRef)
 	if err != nil {
-		return fmt.Errorf("physmath: coord-diff chart unresolvable: %w", err)
+		return fail(fmt.Errorf("physmath: coord-diff chart unresolvable: %w", err))
 	}
 	chart, err := DecodeCoordinateSystem(cpayload)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	fn, err := resolveFunction(store, rec.DeclaringFnRef)
 	if err != nil {
-		return fmt.Errorf("physmath: coord-diff declaring function unresolvable: %w", err)
+		return fail(fmt.Errorf("physmath: coord-diff declaring function unresolvable: %w", err))
 	}
 	if err := checkCoordSelection(store, chart, rec.Mapping, rec.DeclaringFnRef, fn, rec.CoordIndex); err != nil {
+		return fail(err)
+	}
+	return rec, d, nil
+}
+
+// CheckCoordinateDifferentiation is the store-aware provenance gate: it
+// validates the complete stored record against its derivation through the
+// shared helper, then replays the validated derivation before trusting the
+// result.
+func CheckCoordinateDifferentiation(store Store, ref artifact.ArtifactRef) error {
+	_, d, err := resolveAndValidateCoordDiff(store, ref)
+	if err != nil {
 		return err
 	}
 	if err := Replay(store, d, nil); err != nil {
@@ -428,31 +448,21 @@ func CheckCoordinateDifferentiation(store Store, ref artifact.ArtifactRef) error
 	return nil
 }
 
-// ReplayCoordinateDifferentiation re-executes the recorded derivation. It
-// inherits the DIFFERENTIATE-001 identity contract because Replay
-// re-applies the rule per step and requires exact output equality. It is
-// the re-execution gate, not the provenance gate: use
-// CheckCoordinateDifferentiation to also bind the selection to the chart,
-// mapping, and declaring context.
+// ReplayCoordinateDifferentiation is artifact-level replay for a stored
+// coordinate_differentiation/1 record: it validates the complete record
+// against its derivation through the shared helper (families, linkage,
+// parameters, conditions, output, chart binding, coordinate selection) and
+// then re-executes the validated derivation. A corrupted record is rejected
+// even when its inner derivation remains independently replayable: replaying
+// an isolated Derivation via raw Replay establishes only that derivation's
+// own contract, never the validity of a referencing record.
 func ReplayCoordinateDifferentiation(store Store, ref artifact.ArtifactRef) error {
-	fam, payload, err := store.Lookup(ref)
-	if err != nil {
-		return fmt.Errorf("physmath: coord-diff record unresolvable: %w", err)
-	}
-	if fam != FamilyCoordinateDifferentiation {
-		return fmt.Errorf("physmath: target is not coordinate_differentiation/1: %w", ErrBadInput)
-	}
-	rec, err := DecodeCoordinateDifferentiation(payload)
+	_, d, err := resolveAndValidateCoordDiff(store, ref)
 	if err != nil {
 		return err
 	}
-	_, dpayload, err := store.Lookup(rec.DerivationRef)
-	if err != nil {
-		return fmt.Errorf("physmath: coord-diff derivation unresolvable: %w", err)
+	if err := Replay(store, d, nil); err != nil {
+		return fmt.Errorf("physmath: coord-diff derivation does not replay: %w", err)
 	}
-	d, err := DecodeDerivation(dpayload)
-	if err != nil {
-		return err
-	}
-	return Replay(store, d, nil)
+	return nil
 }

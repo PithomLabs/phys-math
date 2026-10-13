@@ -286,13 +286,14 @@ func concatRefs(lists ...[]artifact.ArtifactRef) []artifact.ArtifactRef {
 	return out
 }
 
-// CheckAffineConnection is the store-aware gate for connection artifacts:
-// family/shape resolution, chart-dimension agreement, and symmetry-claim
-// verification by canonical output equality. With non-nil sources it
-// additionally recomputes every coefficient through LeviCivita and
-// requires full reference equality — the connection equivalent of the
-// volume-density premise check.
-func CheckAffineConnection(store Store, connRef artifact.ArtifactRef, src *ConnectionSources) error {
+// CheckAffineConnectionShape is the explicitly shape-only gate for connection
+// artifacts: family/shape resolution, chart-dimension agreement, and
+// symmetry-claim verification by canonical output equality. It establishes
+// structural validity only. It never verifies that the connection was derived
+// from, or agrees with, any metric: do not treat a passing shape check as
+// metric-verified curvature evidence. Use CheckAffineConnection with full
+// sources for derivation or scientific verification.
+func CheckAffineConnectionShape(store Store, connRef artifact.ArtifactRef) error {
 	fam, payload, err := store.Lookup(connRef)
 	if err != nil {
 		return fmt.Errorf("physmath: connection unresolvable: %w", err)
@@ -361,8 +362,33 @@ func CheckAffineConnection(store Store, connRef artifact.ArtifactRef, src *Conne
 			}
 		}
 	}
+	return nil
+}
+
+// CheckAffineConnection is the source-aware gate for connection artifacts: it
+// runs the shape-only validation and additionally recomputes every coefficient
+// through LeviCivita from the supplied source metric, requiring full reference
+// equality — the connection equivalent of the volume-density premise check. A
+// nil source is rejected: shape validity without a source metric is not
+// metric-verified evidence, so boundaries claiming derivation or scientific
+// verification must supply sources. Callers needing structural validation only
+// must call CheckAffineConnectionShape explicitly.
+func CheckAffineConnection(store Store, connRef artifact.ArtifactRef, src *ConnectionSources) error {
 	if src == nil {
-		return nil
+		return fmt.Errorf("physmath: connection metric verification requires sources: %w", ErrBadInput)
+	}
+	if err := CheckAffineConnectionShape(store, connRef); err != nil {
+		return err
+	}
+	// Re-resolve the validated connection for its chart reference (one
+	// extra lookup keeps this function free of invented plumbing).
+	_, payload, err := store.Lookup(connRef)
+	if err != nil {
+		return fmt.Errorf("physmath: connection unresolvable: %w", err)
+	}
+	conn, err := DecodeAffineConnection(payload)
+	if err != nil {
+		return err
 	}
 	recomp, _, err := LeviCivita(store, src.MetricRef, conn.CoordRef, src.Mapping, src.DeclaringFnRef, src.Conds)
 	if err != nil {

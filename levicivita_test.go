@@ -1,6 +1,7 @@
 package physmath
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/PithomLabs/phys-artifact"
@@ -291,9 +292,17 @@ func TestCheckAffineConnection(t *testing.T) {
 	if err := CheckAffineConnection(s, conn, src); err != nil {
 		t.Fatalf("valid connection rejected: %v", err)
 	}
-	// Shape-only check (nil sources) also passes.
-	if err := CheckAffineConnection(s, conn, nil); err != nil {
+	// Explicit shape-only check passes on structural validity alone — and
+	// is documented as never being metric evidence.
+	if err := CheckAffineConnectionShape(s, conn); err != nil {
 		t.Fatalf("shape-only check rejected valid connection: %v", err)
+	}
+	// A nil source cannot pass the metric-verification path, even for a
+	// shape-valid connection.
+	if err := CheckAffineConnection(s, conn, nil); err == nil {
+		t.Fatal("shape-valid connection without sources passed metric verification")
+	} else if !strings.Contains(err.Error(), "requires sources") {
+		t.Fatalf("nil-source rejection wrong boundary: %v", err)
 	}
 	// Tampered coefficient with stale derivation link: recompute catches it
 	// only via full equality — here assert family gate instead by pointing
@@ -313,19 +322,30 @@ func TestCheckAffineConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Shape check still passes (families fine); source recomputation fails.
-	if err := CheckAffineConnection(s, tampered, nil); err != nil {
+	if err := CheckAffineConnectionShape(s, tampered); err != nil {
 		t.Fatalf("shape check should pass tampered families: %v", err)
 	}
 	if err := CheckAffineConnection(s, tampered, src); err == nil {
 		t.Fatal("recomputation accepted tampered coefficients")
 	}
-	// Wrong-family target rejected.
-	if err := CheckAffineConnection(s, one, nil); err == nil {
-		t.Fatal("expression target accepted as connection")
+	// A tampered connection without sources is rejected at the nil-source
+	// gate, not mistaken for verified evidence.
+	if err := CheckAffineConnection(s, tampered, nil); err == nil {
+		t.Fatal("sourceless tampered connection passed metric verification")
 	}
-	// Unresolvable reference rejected.
+	// Wrong-family target rejected by both paths.
+	if err := CheckAffineConnectionShape(s, one); err == nil {
+		t.Fatal("expression target accepted as connection shape")
+	}
+	if err := CheckAffineConnection(s, one, src); err == nil {
+		t.Fatal("expression target accepted as verified connection")
+	}
+	// Unresolvable reference rejected by both paths.
 	ghost := ComputeTestRef(t, "physmath", "affine_connection/1")
-	if err := CheckAffineConnection(s, ghost, nil); err == nil {
-		t.Fatal("unresolvable connection accepted")
+	if err := CheckAffineConnectionShape(s, ghost); err == nil {
+		t.Fatal("unresolvable connection accepted as shape")
+	}
+	if err := CheckAffineConnection(s, ghost, src); err == nil {
+		t.Fatal("unresolvable connection accepted as verified")
 	}
 }

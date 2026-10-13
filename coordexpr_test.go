@@ -325,11 +325,13 @@ func TestCoordDiffProvenance(t *testing.T) {
 		} else if !strings.Contains(err.Error(), "does not match") {
 			t.Fatalf("substituted result wrong boundary: %v", err)
 		}
-		// The inner derivation itself is intact, so re-execution still
-		// passes: this is the documented Check-vs-Replay division (Check
-		// binds the record to its derivation; Replay re-executes it).
-		if err := ReplayCoordinateDifferentiation(s, bad); err != nil {
-			t.Fatalf("intact inner derivation unexpectedly failed replay: %v", err)
+		// Artifact-level replay validates the complete record, so the
+		// substitution fails here too — even though the inner derivation
+		// remains independently replayable via raw Replay.
+		if err := ReplayCoordinateDifferentiation(s, bad); err == nil {
+			t.Fatal("substituted result accepted by artifact replay")
+		} else if !strings.Contains(err.Error(), "does not match") {
+			t.Fatalf("substituted result replay wrong boundary: %v", err)
 		}
 		// Derivation-level output substitution fails both gates.
 		_, dpayload, err := s.Lookup(rec.DerivationRef)
@@ -353,9 +355,11 @@ func TestCoordDiffProvenance(t *testing.T) {
 			c.ResultRef = other
 			c.DerivationRef = altDeriv
 		})
+		// Artifact replay rejects at the record-derivation agreement
+		// gate ("does not match") before raw re-execution is reached.
 		if err := ReplayCoordinateDifferentiation(s, badDeriv); err == nil {
 			t.Fatal("substituted derivation output accepted by Replay")
-		} else if !strings.Contains(err.Error(), "output mismatch") {
+		} else if !strings.Contains(err.Error(), "does not match") {
 			t.Fatalf("substituted derivation output replay wrong boundary: %v", err)
 		}
 		if err := CheckCoordinateDifferentiation(s, badDeriv); err == nil {
@@ -408,9 +412,11 @@ func TestCoordDiffProvenance(t *testing.T) {
 			t.Fatal(err)
 		}
 		bad := tamperRecord(t, s, recRef, func(c *CoordinateDifferentiation) { c.DerivationRef = altDeriv })
+		// Artifact replay rejects at the recorded-selection gate before
+		// any output comparison is reached.
 		if err := ReplayCoordinateDifferentiation(s, bad); err == nil {
 			t.Fatal("altered-variable derivation replayed clean")
-		} else if !strings.Contains(err.Error(), "output mismatch") {
+		} else if !strings.Contains(err.Error(), "parameters mismatch") {
 			t.Fatalf("altered variable replay wrong boundary: %v", err)
 		}
 		if err := CheckCoordinateDifferentiation(s, bad); err == nil {
@@ -534,6 +540,177 @@ func TestGuardedMigrationBoundaries(t *testing.T) {
 		// zeros share one content-addressed record, so 2 x 3 = 6.
 		if found != 6 {
 			t.Fatalf("levi-civita derivation carries %d differentiation records, want 6", found)
+		}
+	})
+}
+
+// TestCoordDiffArtifactReplay is the R1 acceptance table: every tampered
+// coordinate_differentiation/1 record must fail artifact-level replay even
+// when its inner derivation remains independently replayable, while a valid
+// record — including vacuous differentiation — must pass. Both
+// ReplayCoordinateDifferentiation and CheckCoordinateDifferentiation are
+// asserted per case with the intended identity/provenance reason.
+func TestCoordDiffArtifactReplay(t *testing.T) {
+	// mk builds a store with a valid x/y chart record for d/dx(x^2).
+	mk := func(t *testing.T) (*MemStore, artifact.ArtifactRef, CoordParamMap, artifact.ArtifactRef, artifact.ArtifactRef) {
+		s := NewMemStore()
+		chart, mapping, declFn, syms := covChart(t, s, "x", "y")
+		src := mustStoreExpr(t, s, Pow(syms[0], MustRational(2, 1)))
+		_, recRef, _, err := DifferentiateCoordinate(s, src, chart, 0, mapping, declFn, 1, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s, chart, mapping, declFn, recRef
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, s *MemStore, rec CoordinateDifferentiation) CoordinateDifferentiation
+		reason string
+	}{
+		{
+			name: "substituted-result",
+			mutate: func(t *testing.T, s *MemStore, rec CoordinateDifferentiation) CoordinateDifferentiation {
+				rec.ResultRef = mustStoreExpr(t, s, MustRational(99, 1))
+				return rec
+			},
+			reason: "does not match",
+		},
+		{
+			name: "substituted-source",
+			mutate: func(t *testing.T, s *MemStore, rec CoordinateDifferentiation) CoordinateDifferentiation {
+				rec.SourceRef = mustStoreExpr(t, s, MustRational(7, 1))
+				return rec
+			},
+			reason: "step linkage broken",
+		},
+		{
+			name: "substituted-chart",
+			mutate: func(t *testing.T, s *MemStore, rec CoordinateDifferentiation) CoordinateDifferentiation {
+				foreign, _, _, _ := covChart(t, s, "u", "v")
+				rec.ChartRef = foreign
+				return rec
+			},
+			reason: "does not match chart coordinate",
+		},
+		{
+			name: "altered-index",
+			mutate: func(t *testing.T, s *MemStore, rec CoordinateDifferentiation) CoordinateDifferentiation {
+				rec.CoordIndex = 1
+				return rec
+			},
+			reason: "parameters mismatch",
+		},
+		{
+			name: "altered-order",
+			mutate: func(t *testing.T, s *MemStore, rec CoordinateDifferentiation) CoordinateDifferentiation {
+				rec.Order = 2
+				return rec
+			},
+			reason: "parameters mismatch",
+		},
+		{
+			name: "altered-conditions",
+			mutate: func(t *testing.T, s *MemStore, rec CoordinateDifferentiation) CoordinateDifferentiation {
+				rec.ConditionRefs = []artifact.ArtifactRef{
+					detCond(t, s, mustStoreExpr(t, s, MustRational(3, 1))),
+				}
+				return rec
+			},
+			reason: "condition sets differ",
+		},
+		{
+			name: "substituted-derivation",
+			mutate: func(t *testing.T, s *MemStore, rec CoordinateDifferentiation) CoordinateDifferentiation {
+				_, _, _, syms := covChart(t, s, "x", "y")
+				_ = syms
+				chart, mapping, declFn, syms2 := covChart(t, s, "x", "y")
+				other := mustStoreExpr(t, s, Pow(syms2[1], MustRational(2, 1)))
+				_, otherRec, _, err := DifferentiateCoordinate(s, other, chart, 1, mapping, declFn, 1, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rec.DerivationRef = coordRecord(t, s, otherRec).DerivationRef
+				return rec
+			},
+			reason: "does not match",
+		},
+		{
+			name: "constant-source-wrong-variable",
+			mutate: func(t *testing.T, s *MemStore, rec CoordinateDifferentiation) CoordinateDifferentiation {
+				// d/dx(5) = 0 re-minted claiming coordinate 1: the output
+				// coincides (0 == 0) but the selection does not.
+				five := mustStoreExpr(t, s, MustRational(5, 1))
+				_, constRec, _, err := DifferentiateCoordinate(s, five, rec.ChartRef, 0, rec.Mapping, rec.DeclaringFnRef, 1, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				constRecDec := coordRecord(t, s, constRec)
+				constRecDec.CoordIndex = 1
+				raw, err := constRecDec.Encode()
+				if err != nil {
+					t.Fatal(err)
+				}
+				swapped, err := s.Put(FamilyCoordinateDifferentiation, raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = rec
+				return coordRecord(t, s, swapped)
+			},
+			reason: "parameters mismatch",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, _, _, recRef := mk(t)
+			rec := coordRecord(t, s, recRef)
+			mut := tc.mutate(t, s, rec)
+			raw, err := mut.Encode()
+			if err != nil {
+				t.Fatalf("tampered record does not encode: %v", err)
+			}
+			bad, err := s.Put(FamilyCoordinateDifferentiation, raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ReplayCoordinateDifferentiation(s, bad); err == nil {
+				t.Fatalf("%s accepted by artifact replay", tc.name)
+			} else if !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("%s replay wrong boundary (want %q): %v", tc.name, tc.reason, err)
+			}
+			if err := CheckCoordinateDifferentiation(s, bad); err == nil {
+				t.Fatalf("%s accepted by Check", tc.name)
+			} else if !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("%s check wrong boundary (want %q): %v", tc.name, tc.reason, err)
+			}
+		})
+	}
+
+	t.Run("valid-record-passes", func(t *testing.T) {
+		s, _, _, _, recRef := mk(t)
+		if err := ReplayCoordinateDifferentiation(s, recRef); err != nil {
+			t.Fatalf("valid record rejected by artifact replay: %v", err)
+		}
+		if err := CheckCoordinateDifferentiation(s, recRef); err != nil {
+			t.Fatalf("valid record rejected by Check: %v", err)
+		}
+	})
+
+	t.Run("vacuous-record-passes", func(t *testing.T) {
+		s := NewMemStore()
+		chart, mapping, declFn, syms := covChart(t, s, "x", "y")
+		src := mustStoreExpr(t, s, Pow(syms[0], MustRational(2, 1)))
+		_, recRef, _, err := DifferentiateCoordinate(s, src, chart, 1, mapping, declFn, 1, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ReplayCoordinateDifferentiation(s, recRef); err != nil {
+			t.Fatalf("vacuous record rejected by artifact replay: %v", err)
+		}
+		if err := CheckCoordinateDifferentiation(s, recRef); err != nil {
+			t.Fatalf("vacuous record rejected by Check: %v", err)
 		}
 	})
 }
