@@ -12,11 +12,11 @@ geometry-building tests and runs serially inside the package:
 
 | Shard | Selector | Wall time (16-core reference) |
 |---|---|---|
-| A — obligation tests | `-run 'TestObligation'` | ~15 min |
-| B — divergence tests | `-run 'TestDivergence'` | ~7 min |
-| C — everything else | `-skip 'TestObligation\|TestDivergence'` | seconds |
+| A — obligation tests | `-run 'TestObligation\|TestWitness'` | ~14 min |
+| B — divergence tests | `-run 'TestDivergence'` | ~5 min |
+| C — everything else | `-skip 'TestObligation\|TestDivergence\|TestWitness'` | seconds |
 
-Serial total is ~30 min; sharded wall time is bounded by shard A (~15 min).
+Serial total is ~30 min; sharded wall time is bounded by shard A.
 
 ### Rules
 
@@ -64,9 +64,9 @@ carry the line: "no verdicts reused across runs."
 
 ```bash
 # from the phys-math root, shards in parallel background jobs:
-go test -count=1 -timeout 115m -run 'TestObligation' -v .
+go test -count=1 -timeout 115m -run 'TestObligation|TestWitness' -v .
 go test -count=1 -timeout 115m -run 'TestDivergence' -v .
-go test -count=1 -timeout 115m -skip 'TestObligation|TestDivergence' .
+go test -count=1 -timeout 115m -skip 'TestObligation|TestDivergence|TestWitness' .
 
 # registry / purity / import gate (fast, explicit):
 go test -count=1 -run 'TestRegistryCompleteness|TestNoPhysicalVocabulary|TestImportDiscipline' -v .
