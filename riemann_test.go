@@ -3480,9 +3480,87 @@ func divergenceChain(t *testing.T, s Store) (df, drec, trec, crec, srec artifact
 	return df, drec, trec, crec, srec
 }
 
+// cloneMemStore returns an isolated deep copy of a MemStore. Stored
+// payloads are never mutated in place (Put copies on write, Lookup copies
+// on read), so each side mints further artifacts independently after the
+// copy. Test aid only (Plan 1.20): subtests share one expensive geometry
+// build while tampering their own copy.
+func cloneMemStore(t *testing.T, s *MemStore) *MemStore {
+	t.Helper()
+	if s == nil || s.items == nil {
+		t.Fatal("clone source is nil")
+	}
+	out := NewMemStore()
+	for ref, e := range s.items {
+		cp := make([]byte, len(e.payload))
+		copy(cp, e.payload)
+		out.items[ref] = memEntry{family: e.family, payload: cp}
+	}
+	return out
+}
+
+// divergenceAdversarialBase prebuilds the warped divergence chain plus
+// every valid foreign artifact the F-3 rows substitute, once per parent
+// test run. Subtests clone the store and tamper their copy, so one build
+// serves all seven math-sensitive rows. The polar rows keep their own
+// cheap chains; TestDivergenceWarped remains the independent
+// from-scratch construction control.
+type divergenceAdversarialBase struct {
+	store        *MemStore
+	drec         artifact.ArtifactRef
+	foreignChart artifact.ArtifactRef
+	foreignConn  artifact.ArtifactRef
+	altDeclaring artifact.ArtifactRef
+	altCovariant artifact.ArtifactRef
+}
+
+func buildDivergenceAdversarialBase(t *testing.T) *divergenceAdversarialBase {
+	t.Helper()
+	s := NewMemStore()
+	_, drec, _, crecRef, _ := divergenceChain(t, s)
+	rec := divergenceRecord(t, s, drec)
+	pchart, pmetric, pfn, pmap, _, _, _, pcond := prodSetup(t, s)
+	foreignConn, _, err := LeviCivita(s, pmetric, pchart, pmap, pfn, []artifact.ArtifactRef{pcond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same parameter identities and display names as the warped declaring
+	// function, but a different body: a valid function/1 that never
+	// declared the recorded mapping.
+	px, py, pz := DeriveParameterID(0), DeriveParameterID(1), DeriveParameterID(2)
+	altBody := mustStoreExpr(t, s, NewBoundSymbol("y", py))
+	altFn := Function{ParameterIDs: []ParameterID{px, py, pz},
+		ParamNames: []string{"x", "y", "z"}, BodyRef: altBody}
+	altBytes, err := altFn.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	altDeclaring, err := s.Put(FamilyFunction, altBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Covariant derivative of the contraction (Ricci) field through the
+	// same connection and binding: valid rank-3 evidence over the same
+	// chart, but different content from the recorded G-field derivative.
+	crec := riemannContractionRecord(t, s, crecRef)
+	altCovariant, _, err := EvaluateCovariantDerivative(s, crec.ResultRef, rec.ConnectionRef, rec.Mapping, rec.DeclaringFnRef, rec.ConditionRefs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if altCovariant == rec.CovariantResultRef {
+		t.Fatal("alternate derivative coincides with recorded evidence: substitution vacuous")
+	}
+	return &divergenceAdversarialBase{
+		store: s, drec: drec,
+		foreignChart: pchart, foreignConn: foreignConn,
+		altDeclaring: altDeclaring, altCovariant: altCovariant,
+	}
+}
+
 // TestDivergenceAdversarial proves corrupted divergence evidence fails Check
 // and artifact Replay at the intended boundary. Polar 2D chains cover the
-// structural cases fast; warped chains cover math-sensitive ones.
+// structural cases fast; warped chains cover math-sensitive ones through
+// one shared fixture (cloned per subtest).
 func TestDivergenceAdversarial(t *testing.T) {
 	polarChain := func(t *testing.T, s *MemStore) (artifact.ArtifactRef, artifact.ArtifactRef) {
 		t.Helper()
@@ -3733,74 +3811,38 @@ func TestDivergenceAdversarial(t *testing.T) {
 	// realistic valid-but-inconsistent substitutes that resolve in the
 	// store, so each failure proves the provenance boundary rather than
 	// mere resolvability. Geometries share one store so foreign artifacts
-	// are valid where they stand.
+	// are valid where they stand. Plan 1.20: the warped chain and all
+	// foreign artifacts are built once in base; each row clones the store
+	// and tampers its own copy.
+	base := buildDivergenceAdversarialBase(t)
 
 	t.Run("valid-foreign-chart", func(t *testing.T) {
-		s := NewMemStore()
-		_, drec, _, _, _ := divergenceChain(t, s)
-		pchart, _, _, _, _, _, _, _ := prodSetup(t, s)
-		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ChartRef = pchart })
+		s := cloneMemStore(t, base.store)
+		bad := tamperDivergenceRecord(t, s, base.drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ChartRef = base.foreignChart })
 		bothFail(t, s, bad, "chart breaks the provenance chain")
 	})
 
 	t.Run("valid-foreign-connection", func(t *testing.T) {
-		s := NewMemStore()
-		_, drec, _, _, _ := divergenceChain(t, s)
-		pchart, pmetric, pfn, pmap, _, _, _, pcond := prodSetup(t, s)
-		foreignConn, _, err := LeviCivita(s, pmetric, pchart, pmap, pfn, []artifact.ArtifactRef{pcond})
-		if err != nil {
-			t.Fatal(err)
-		}
-		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ConnectionRef = foreignConn })
+		s := cloneMemStore(t, base.store)
+		bad := tamperDivergenceRecord(t, s, base.drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ConnectionRef = base.foreignConn })
 		bothFail(t, s, bad, "connection does not match the source metric")
 	})
 
 	t.Run("different-declaring-function", func(t *testing.T) {
-		s := NewMemStore()
-		_, drec, _, _, _ := divergenceChain(t, s)
-		// Same parameter identities and display names as the warped
-		// declaring function, but a different body: a valid function/1
-		// that never declared the recorded mapping.
-		px, py, pz := DeriveParameterID(0), DeriveParameterID(1), DeriveParameterID(2)
-		altBody := mustStoreExpr(t, s, NewBoundSymbol("y", py))
-		altFn := Function{ParameterIDs: []ParameterID{px, py, pz},
-			ParamNames: []string{"x", "y", "z"}, BodyRef: altBody}
-		altBytes, err := altFn.Encode()
-		if err != nil {
-			t.Fatal(err)
-		}
-		altRef, err := s.Put(FamilyFunction, altBytes)
-		if err != nil {
-			t.Fatal(err)
-		}
-		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DeclaringFnRef = altRef })
+		s := cloneMemStore(t, base.store)
+		bad := tamperDivergenceRecord(t, s, base.drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DeclaringFnRef = base.altDeclaring })
 		bothFail(t, s, bad, "declaring function differs")
 	})
 
 	t.Run("substituted-covariant-derivative", func(t *testing.T) {
-		s := NewMemStore()
-		_, drec, _, crecRef, _ := divergenceChain(t, s)
-		rec := divergenceRecord(t, s, drec)
-		crec := riemannContractionRecord(t, s, crecRef)
-		// Covariant derivative of the contraction (Ricci) field through
-		// the same connection and binding: valid rank-3 evidence over the
-		// same chart, but different content from the recorded G-field
-		// derivative.
-		altField, _, err := EvaluateCovariantDerivative(s, crec.ResultRef, rec.ConnectionRef, rec.Mapping, rec.DeclaringFnRef, rec.ConditionRefs)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if altField == rec.CovariantResultRef {
-			t.Fatal("alternate derivative coincides with recorded evidence: substitution vacuous")
-		}
-		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.CovariantResultRef = altField })
+		s := cloneMemStore(t, base.store)
+		bad := tamperDivergenceRecord(t, s, base.drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.CovariantResultRef = base.altCovariant })
 		bothFail(t, s, bad, "covariant evidence does not match recomputation")
 	})
 
 	t.Run("reordered-result-components", func(t *testing.T) {
-		s := NewMemStore()
-		_, drec, _, _, _ := divergenceChain(t, s)
-		rec := divergenceRecord(t, s, drec)
+		s := cloneMemStore(t, base.store)
+		rec := divergenceRecord(t, s, base.drec)
 		_, fpayload, err := s.Lookup(rec.ResultRef)
 		if err != nil {
 			t.Fatal(err)
@@ -3829,14 +3871,13 @@ func TestDivergenceAdversarial(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ResultRef = newField })
+		bad := tamperDivergenceRecord(t, s, base.drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ResultRef = newField })
 		bothFail(t, s, bad, "result component 0 mismatch")
 	})
 
 	t.Run("tampered-derivation-premises", func(t *testing.T) {
-		s := NewMemStore()
-		_, drec, _, _, _ := divergenceChain(t, s)
-		rec := divergenceRecord(t, s, drec)
+		s := cloneMemStore(t, base.store)
+		rec := divergenceRecord(t, s, base.drec)
 		_, dpayload, err := s.Lookup(rec.DerivationRef)
 		if err != nil {
 			t.Fatal(err)
@@ -3855,7 +3896,7 @@ func TestDivergenceAdversarial(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		badDrop := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DerivationRef = altDrop })
+		badDrop := tamperDivergenceRecord(t, s, base.drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DerivationRef = altDrop })
 		bothFail(t, s, badDrop, "premises do not match recomputation")
 		// Added premise: a fresh expression resolves and is a permitted
 		// premise family, so only the linkage gate can reject it.
@@ -3869,14 +3910,13 @@ func TestDivergenceAdversarial(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		badAdd := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DerivationRef = altAdd })
+		badAdd := tamperDivergenceRecord(t, s, base.drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DerivationRef = altAdd })
 		bothFail(t, s, badAdd, "premises do not match recomputation")
 	})
 
 	t.Run("permuted-derivation-steps", func(t *testing.T) {
-		s := NewMemStore()
-		_, drec, _, _, _ := divergenceChain(t, s)
-		rec := divergenceRecord(t, s, drec)
+		s := cloneMemStore(t, base.store)
+		rec := divergenceRecord(t, s, base.drec)
 		_, dpayload, err := s.Lookup(rec.DerivationRef)
 		if err != nil {
 			t.Fatal(err)
@@ -3900,7 +3940,7 @@ func TestDivergenceAdversarial(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		badLast := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DerivationRef = altLast })
+		badLast := tamperDivergenceRecord(t, s, base.drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DerivationRef = altLast })
 		bothFail(t, s, badLast, "must be CANON")
 		// Swap two CANON steps from different assembly pairs: rule slots
 		// stay CANON but the premise linkage breaks.
@@ -3918,7 +3958,7 @@ func TestDivergenceAdversarial(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		badCross := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DerivationRef = altCross })
+		badCross := tamperDivergenceRecord(t, s, base.drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DerivationRef = altCross })
 		bothFail(t, s, badCross, "premise mismatch")
 	})
 }

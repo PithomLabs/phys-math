@@ -39,8 +39,26 @@ Serial total is ~30 min; sharded wall time is bounded by shard A (~15 min).
    helpers were written for serial execution; parallelizing them is
    out-of-scope churn with race risk. Process-level sharding is the
    approved mechanism.
-7. **Report actual commands, exit codes, and timings** for every
+7. **Deduplicate builds within a run, never verdicts across runs.**
+   Expensive geometry chains are built once per parent test and cloned
+   per subtest (`cloneMemStore`); a green verdict from a previous run or
+   an unchanged input digest never excuses re-execution, because the
+   suite guards the engine and any edit can change what identical inputs
+   produce. Review must reject content-address-equality skip proposals.
+8. **Report actual commands, exit codes, and timings** for every
    verification run. Never substitute a prior run's results.
+
+### Tiers (Plan 1.20)
+
+- **Tier 0** — shard C + registry/purity gate + `go vet` + `gofmt`.
+  Always runs. Seconds.
+- **Tier 1** — the affected heavy shard (A and/or B). Runs when
+  `Evaluate*`, checker, fixture, or test files in its area change.
+- **Tier 2** — all shards. Pre-commit gate only.
+
+Each milestone plan declares its tiers up front; the commit report lists
+which tiers ran and why the others were excluded. Milestone checklists
+carry the line: "no verdicts reused across runs."
 
 ### Canonical verification sequence (Plan 1.19 and later)
 

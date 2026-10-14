@@ -94,6 +94,33 @@ func tamperObligationRecord(t *testing.T, s Store, ref artifact.ArtifactRef, mut
 	return bad
 }
 
+// obligationFixture prebuilds both divergence instances plus the
+// two-instance and warped-only obligation records once per parent test.
+// Subtests clone the store and tamper their copy. TestObligationEvaluated
+// keeps its own fresh build as the construction control.
+type obligationFixture struct {
+	store     *MemStore
+	warped    artifact.ArtifactRef
+	product   artifact.ArtifactRef
+	recBoth   artifact.ArtifactRef
+	recWarped artifact.ArtifactRef
+}
+
+func buildObligationFixture(t *testing.T) *obligationFixture {
+	t.Helper()
+	s := NewMemStore()
+	warped, product := obligationInstances(t, s)
+	recBoth, _, err := EvaluateRiemannTraceReverseDivergenceObligation(s, []artifact.ArtifactRef{warped, product})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recWarped, _, err := EvaluateRiemannTraceReverseDivergenceObligation(s, []artifact.ArtifactRef{warped})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &obligationFixture{store: s, warped: warped, product: product, recBoth: recBoth, recWarped: recWarped}
+}
+
 // TestObligationEvaluated pins the valid two-geometry obligation: claim,
 // scope, support, instance linkage, evidence classification per component,
 // and acceptance by both gates.
@@ -180,7 +207,9 @@ func TestObligationEvaluated(t *testing.T) {
 }
 
 // TestObligationAdversarial proves corrupted obligation records fail Check
-// and artifact Replay at the intended boundary.
+// and artifact Replay at the intended boundary. Both instances and both
+// obligation records are built once in the fixture; each row clones the
+// store and tampers its own copy.
 func TestObligationAdversarial(t *testing.T) {
 	bothFail := func(t *testing.T, s *MemStore, bad artifact.ArtifactRef, reason string) {
 		t.Helper()
@@ -195,103 +224,69 @@ func TestObligationAdversarial(t *testing.T) {
 			t.Fatalf("replay wrong boundary (want %q): %v", reason, err)
 		}
 	}
+	fix := buildObligationFixture(t)
 
 	t.Run("swapped-instances", func(t *testing.T) {
-		s := NewMemStore()
-		warped, product := obligationInstances(t, s)
-		recRef, _, err := EvaluateRiemannTraceReverseDivergenceObligation(s, []artifact.ArtifactRef{warped, product})
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := cloneMemStore(t, fix.store)
 		// Swap instance order while results stay put: each stored result
 		// no longer matches its position's evaluated instance.
-		bad := tamperObligationRecord(t, s, recRef, func(r *RiemannTraceReverseDivergenceObligation) {
+		bad := tamperObligationRecord(t, s, fix.recBoth, func(r *RiemannTraceReverseDivergenceObligation) {
 			r.DivergenceRefs[0], r.DivergenceRefs[1] = r.DivergenceRefs[1], r.DivergenceRefs[0]
 		})
 		bothFail(t, s, bad, "does not match evaluated instance")
 	})
 
 	t.Run("substituted-result", func(t *testing.T) {
-		s := NewMemStore()
-		warped, product := obligationInstances(t, s)
-		recRef, _, err := EvaluateRiemannTraceReverseDivergenceObligation(s, []artifact.ArtifactRef{warped, product})
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := cloneMemStore(t, fix.store)
 		other := mustStoreExpr(t, s, MustRational(13, 1))
-		bad := tamperObligationRecord(t, s, recRef, func(r *RiemannTraceReverseDivergenceObligation) { r.ResultRefs[0] = other })
+		bad := tamperObligationRecord(t, s, fix.recBoth, func(r *RiemannTraceReverseDivergenceObligation) { r.ResultRefs[0] = other })
 		bothFail(t, s, bad, "not in closed target set")
 	})
 
 	t.Run("dropped-condition", func(t *testing.T) {
-		s := NewMemStore()
-		warped, product := obligationInstances(t, s)
-		recRef, _, err := EvaluateRiemannTraceReverseDivergenceObligation(s, []artifact.ArtifactRef{warped, product})
-		if err != nil {
-			t.Fatal(err)
-		}
-		bad := tamperObligationRecord(t, s, recRef, func(r *RiemannTraceReverseDivergenceObligation) { r.ConditionRefs = r.ConditionRefs[:1] })
+		s := cloneMemStore(t, fix.store)
+		bad := tamperObligationRecord(t, s, fix.recBoth, func(r *RiemannTraceReverseDivergenceObligation) { r.ConditionRefs = r.ConditionRefs[:1] })
 		bothFail(t, s, bad, "conditions do not match evaluated instances")
 	})
 
 	t.Run("foreign-condition", func(t *testing.T) {
-		s := NewMemStore()
-		warped, product := obligationInstances(t, s)
-		recRef, _, err := EvaluateRiemannTraceReverseDivergenceObligation(s, []artifact.ArtifactRef{warped})
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := cloneMemStore(t, fix.store)
 		// A valid condition from the product instance resolves in the
 		// closed target set, so only the union gate can reject it.
-		prec := divergenceRecord(t, s, product)
+		prec := divergenceRecord(t, s, fix.product)
 		if len(prec.ConditionRefs) == 0 {
 			t.Fatal("product instance has no conditions")
 		}
 		foreign := prec.ConditionRefs[0]
-		bad := tamperObligationRecord(t, s, recRef, func(r *RiemannTraceReverseDivergenceObligation) {
+		bad := tamperObligationRecord(t, s, fix.recWarped, func(r *RiemannTraceReverseDivergenceObligation) {
 			r.ConditionRefs = append(append([]artifact.ArtifactRef{}, r.ConditionRefs...), foreign)
 		})
 		bothFail(t, s, bad, "conditions do not match evaluated instances")
 	})
 
 	t.Run("unsupported-support-status", func(t *testing.T) {
-		s := NewMemStore()
-		warped, product := obligationInstances(t, s)
-		recRef, _, err := EvaluateRiemannTraceReverseDivergenceObligation(s, []artifact.ArtifactRef{warped, product})
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := cloneMemStore(t, fix.store)
 		// Promoting the status to a general-proof claim must not pass:
 		// decoding rejects the unsupported value at both gates.
-		bad := tamperObligationRecord(t, s, recRef, func(r *RiemannTraceReverseDivergenceObligation) { r.Support = "PROVED" })
+		bad := tamperObligationRecord(t, s, fix.recBoth, func(r *RiemannTraceReverseDivergenceObligation) { r.Support = "PROVED" })
 		bothFail(t, s, bad, "support")
 	})
 
 	t.Run("tampered-claim-scope", func(t *testing.T) {
-		s := NewMemStore()
-		warped, product := obligationInstances(t, s)
-		recRef, _, err := EvaluateRiemannTraceReverseDivergenceObligation(s, []artifact.ArtifactRef{warped, product})
-		if err != nil {
-			t.Fatal(err)
-		}
-		badClaim := tamperObligationRecord(t, s, recRef, func(r *RiemannTraceReverseDivergenceObligation) {
+		s := cloneMemStore(t, fix.store)
+		badClaim := tamperObligationRecord(t, s, fix.recBoth, func(r *RiemannTraceReverseDivergenceObligation) {
 			r.Statement = "divergence vanishes everywhere by proof"
 		})
 		bothFail(t, s, badClaim, "statement mismatch")
-		badScope := tamperObligationRecord(t, s, recRef, func(r *RiemannTraceReverseDivergenceObligation) {
+		badScope := tamperObligationRecord(t, s, fix.recBoth, func(r *RiemannTraceReverseDivergenceObligation) {
 			r.Scope = "all geometries"
 		})
 		bothFail(t, s, badScope, "scope mismatch")
 	})
 
 	t.Run("truncated-derivation", func(t *testing.T) {
-		s := NewMemStore()
-		warped, product := obligationInstances(t, s)
-		recRef, _, err := EvaluateRiemannTraceReverseDivergenceObligation(s, []artifact.ArtifactRef{warped, product})
-		if err != nil {
-			t.Fatal(err)
-		}
-		rec := obligationRecord(t, s, recRef)
+		s := cloneMemStore(t, fix.store)
+		rec := obligationRecord(t, s, fix.recBoth)
 		_, dpayload, err := s.Lookup(rec.DerivationRef)
 		if err != nil {
 			t.Fatal(err)
@@ -309,17 +304,13 @@ func TestObligationAdversarial(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		bad := tamperObligationRecord(t, s, recRef, func(r *RiemannTraceReverseDivergenceObligation) { r.DerivationRef = altDeriv })
+		bad := tamperObligationRecord(t, s, fix.recBoth, func(r *RiemannTraceReverseDivergenceObligation) { r.DerivationRef = altDeriv })
 		bothFail(t, s, bad, "shorter than instance")
 	})
 
 	t.Run("ghost-instance", func(t *testing.T) {
+		// No fixture needed: ghost references resolve nowhere.
 		s := NewMemStore()
-		warped, product := obligationInstances(t, s)
-		recRef, _, err := EvaluateRiemannTraceReverseDivergenceObligation(s, []artifact.ArtifactRef{warped, product})
-		if err != nil {
-			t.Fatal(err)
-		}
 		ghost := ComputeTestRef(t, "physmath", "riemann_trace_reverse_divergence/1")
 		if err := CheckRiemannTraceReverseDivergenceObligation(s, ghost); err == nil {
 			t.Fatal("unresolvable record accepted")
@@ -331,7 +322,6 @@ func TestObligationAdversarial(t *testing.T) {
 		if err := CheckRiemannTraceReverseDivergenceObligation(s, exprRef); err == nil {
 			t.Fatal("expression target accepted")
 		}
-		_ = recRef
 	})
 }
 
@@ -339,13 +329,9 @@ func TestObligationAdversarial(t *testing.T) {
 // truncation/trailing rejection, and structural validation of empty,
 // length-mismatched, duplicated, and mis-supported records.
 func TestObligationCodec(t *testing.T) {
-	s := NewMemStore()
-	warped, product := obligationInstances(t, s)
-	recRef, _, err := EvaluateRiemannTraceReverseDivergenceObligation(s, []artifact.ArtifactRef{warped, product})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rec := obligationRecord(t, s, recRef)
+	fix := buildObligationFixture(t)
+	s := cloneMemStore(t, fix.store)
+	rec := obligationRecord(t, s, fix.recBoth)
 	raw, err := rec.Encode()
 	if err != nil {
 		t.Fatal(err)
@@ -371,7 +357,7 @@ func TestObligationCodec(t *testing.T) {
 		t.Fatal("length-mismatched record validated")
 	}
 	dup := rec
-	dup.DivergenceRefs = []artifact.ArtifactRef{warped, warped}
+	dup.DivergenceRefs = []artifact.ArtifactRef{fix.warped, fix.warped}
 	dup.ResultRefs = []artifact.ArtifactRef{rec.ResultRefs[0], rec.ResultRefs[0]}
 	if err := dup.Validate(); err == nil {
 		t.Fatal("duplicate-instance record validated")
@@ -381,5 +367,4 @@ func TestObligationCodec(t *testing.T) {
 	if err := badSupport.Validate(); err == nil {
 		t.Fatal("general-proof status validated")
 	}
-	_ = product
 }
