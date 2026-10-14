@@ -727,9 +727,6 @@ func resolveAndValidateDivergence(store Store, ref artifact.ArtifactRef) (Rieman
 	if reCovField != rec.CovariantResultRef {
 		return fail(fmt.Errorf("physmath: divergence covariant evidence does not match recomputation"))
 	}
-	if reCovField != rec.CovariantResultRef {
-		return fail(fmt.Errorf("physmath: divergence covariant evidence does not match recomputation"))
-	}
 	// Contraction recompute with ordered comparison.
 	hexprs, err := resolveComponents(store, "divergence covariant", covT.ComponentRefs)
 	if err != nil {

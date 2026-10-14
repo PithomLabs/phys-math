@@ -56,6 +56,7 @@ func AllPhysMathFamilies() []FamilyID {
 		FamilyCoordinateDifferentiation, FamilyRiemannEvaluation,
 		FamilyRiemannContraction, FamilyRiemannScalar, FamilyRiemannTraceReverse,
 		FamilyRiemannTraceReverseDivergence,
+		FamilyRiemannTraceReverseDivergenceObligation,
 	}
 }
 
@@ -785,6 +786,8 @@ var premiseFamilies = []FamilyID{
 	FamilyRiemannTraceReverse,
 	// Divergence records (validated data; never step outputs):
 	FamilyRiemannTraceReverseDivergence,
+	// Evaluated-obligation records (validated data; never step outputs):
+	FamilyRiemannTraceReverseDivergenceObligation,
 }
 
 // resultFamilies is the closed result family set (spec §12.3): premises minus
@@ -796,7 +799,7 @@ var resultFamilies = []FamilyID{
 	FamilyTensor, FamilyIndex, FamilySymmetricBilinear, FamilyContraction,
 	FamilyVolumeDensity, FamilyContractionEvaluation, FamilyVariationReduction,
 	FamilyCoordinateSystem, FamilyTensorField, FamilyAffineConnection,
-	FamilyDomain, FamilyIntegral, FamilyCoordinateDifferentiation, FamilyRiemannEvaluation, FamilyRiemannContraction, FamilyRiemannScalar, FamilyRiemannTraceReverse, FamilyRiemannTraceReverseDivergence,
+	FamilyDomain, FamilyIntegral, FamilyCoordinateDifferentiation, FamilyRiemannEvaluation, FamilyRiemannContraction, FamilyRiemannScalar, FamilyRiemannTraceReverse, FamilyRiemannTraceReverseDivergence, FamilyRiemannTraceReverseDivergenceObligation,
 }
 
 // DerivationStep is inline data inside physmath/derivation/1 (spec §12.2). It has

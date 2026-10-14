@@ -2744,8 +2744,11 @@ func TestDivergenceWarped(t *testing.T) {
 		t.Fatalf("warped D[0] at x=0 is not zero:\n%s", showExpr(got))
 	}
 	// Assembly wiring: the nu=0 premise carries 9 products in (lambda,mu)
-	// order with exact inverse/covariant operand references.
+	// order with exact inverse/covariant operand references. The nu=1,2
+	// premises carry the same positional contract.
 	assertDivergenceWiring(t, s, recRef, 0, invComps, hessComps)
+	assertDivergenceWiring(t, s, recRef, 1, invComps, hessComps)
+	assertDivergenceWiring(t, s, recRef, 2, invComps, hessComps)
 	if err := CheckRiemannTraceReverseDivergence(s, recRef); err != nil {
 		t.Fatalf("warped divergence rejected by Check: %v", err)
 	}
@@ -3123,9 +3126,6 @@ func pinWarpedValues(t *testing.T, s Store, rec RiemannTraceReverseDivergenceEva
 	}
 	gxxy := mustResolve(t, s, cc.CoefficientRefs[4])
 	gyxy := mustResolve(t, s, cc.CoefficientRefs[10])
-	for _, x := range []int64{0, 1, 2} {
-		_ = x
-	}
 	val(gxxy, 0, 0, 1)
 	val(gxxy, 1, -4, 1)
 	val(gxxy, 2, -20, 1)
@@ -3321,10 +3321,14 @@ func taskRecomputeX(t *testing.T, s Store, rec RiemannTraceReverseDivergenceEval
 }
 
 // TestDivergenceProduct is the Case-A regression golden for
-// ds^2 = dr^2 + r^2 dtheta^2 + dz^2 (flat product: all curvature values
-// vanish, nonzero connection). D_y and D_z are exactly zero; D_x is a
-// two-term factored sum (rr and thth diagonal routes; the zz route strips
-// exactly). This is a regression case, not the sole correctness golden.
+// ds^2 = dx^2 + f^2 dy^2 + dz^2 with f = 1+x^2. D_y and D_z are exactly
+// zero; D_x is a two-term factored sum pairing the diagonal routes
+// H[(0,0,0)] and H[(1,1,0)]. Those participating routes are value-zero,
+// and the only value-nonzero route H[(0,2,2)] = nabla_x G_zz = -2f'/f^2
+// drops via the zero off-diagonal inverse component, so this case proves
+// route structure and drop-out, not nonzero-term cancellation. The warped
+// geometry is the nontrivial cancellation golden. This is a regression
+// case, not the sole correctness golden.
 func TestDivergenceProduct(t *testing.T) {
 	s := NewMemStore()
 	chart, metric, fn, mapping, _, _, _, cond := prodSetup(t, s)
@@ -3363,19 +3367,31 @@ func TestDivergenceProduct(t *testing.T) {
 	rec := divergenceRecord(t, s, recRef)
 	invComps := tensorComps(t, s, rec.InvTensorRef)
 	hessComps := tensorComps(t, s, mustTensorOf(t, s, rec.CovariantResultRef))
-	// D_x pairs the rr and thth diagonal routes (the zz route strips
-	// exactly since its derivative route is literal zero).
+	// D_x pairs the xx and yy diagonal routes H[(0,0,0)] and H[(1,1,0)],
+	// both value-zero. The zz route H[(0,2,2)] = nabla_x G_zz is
+	// value-nonzero but strips via the zero off-diagonal inverse
+	// component, so it never enters the contraction.
 	if comps[0].Kind != TagAdd || len(comps[0].Children) != 2 {
 		t.Fatalf("product D[0] is not a two-term sum:\n%s", showExpr(comps[0]))
 	}
 	assertPairMultiset(t, "product D[0] pairing",
 		comps[0].Children,
 		[][2]Expr{{invComps[0], hessComps[0]}, {invComps[4], hessComps[12]}})
+	// Structural guard only: the surviving routes are non-literal forms
+	// (they evaluate to zero without being literal zeros). Genuine
+	// value-nonzero content in this fixture lives in R_xx, R_yy, R, and
+	// G_zz (pinned below), not in a surviving derivative route.
 	for _, k := range []int{0, 12} {
 		if hessComps[k].Equal(zero) {
 			t.Fatalf("product H-route %d is literal zero: nontrivial computation lost", k)
 		}
 	}
+	// Value pin for the dropped route: H[(0,2,2)] = nabla_x G_zz =
+	// -2f'/f^2 is genuinely value-nonzero (x=1 -> -1), proving the
+	// off-diagonal route is correctly excluded by the zero inverse
+	// factor rather than silently folded into the contraction. Route
+	// (lam,mu,nu) = (0,2,2) sits at row-major index (0*3+2)*3+2 = 8.
+	assertEvalValue(t, hessComps[8], DeriveParameterID(0), 1, -1, 1)
 	// G_zz is the nonzero input: G_zz = -R/2 with R = -4/f gives 2/f.
 	// Point: x=0 -> 2, x=1 -> 1, x=2 -> 2/5. (Coordinates here are x,y,z
 	// with f = 1+x^2; there is no polar singularity in this fixture.)
@@ -3406,6 +3422,11 @@ func TestDivergenceProduct(t *testing.T) {
 	assertEvalValue(t, scalar, px, 0, -4, 1)
 	assertEvalValue(t, scalar, px, 1, -2, 1)
 	assertEvalValue(t, scalar, px, 2, -4, 5)
+	// Explicit positional wiring for all three assembly premises; the
+	// checker additionally covers every premise by reference identity.
+	assertDivergenceWiring(t, s, recRef, 0, invComps, hessComps)
+	assertDivergenceWiring(t, s, recRef, 1, invComps, hessComps)
+	assertDivergenceWiring(t, s, recRef, 2, invComps, hessComps)
 	if err := CheckRiemannTraceReverseDivergence(s, recRef); err != nil {
 		t.Fatalf("product divergence rejected by Check: %v", err)
 	}
@@ -3705,6 +3726,200 @@ func TestDivergenceAdversarial(t *testing.T) {
 		// rank and content mismatch the recorded rank-3 evidence.
 		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.CovariantResultRef = r.ResultRef })
 		bothFail(t, s, bad, "covariant shape wrong")
+	})
+
+	// Plan 1.19 (F-3): the in-suite matrix previously relied on ghost or
+	// unresolvable references for several gates. The rows below use
+	// realistic valid-but-inconsistent substitutes that resolve in the
+	// store, so each failure proves the provenance boundary rather than
+	// mere resolvability. Geometries share one store so foreign artifacts
+	// are valid where they stand.
+
+	t.Run("valid-foreign-chart", func(t *testing.T) {
+		s := NewMemStore()
+		_, drec, _, _, _ := divergenceChain(t, s)
+		pchart, _, _, _, _, _, _, _ := prodSetup(t, s)
+		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ChartRef = pchart })
+		bothFail(t, s, bad, "chart breaks the provenance chain")
+	})
+
+	t.Run("valid-foreign-connection", func(t *testing.T) {
+		s := NewMemStore()
+		_, drec, _, _, _ := divergenceChain(t, s)
+		pchart, pmetric, pfn, pmap, _, _, _, pcond := prodSetup(t, s)
+		foreignConn, _, err := LeviCivita(s, pmetric, pchart, pmap, pfn, []artifact.ArtifactRef{pcond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ConnectionRef = foreignConn })
+		bothFail(t, s, bad, "connection does not match the source metric")
+	})
+
+	t.Run("different-declaring-function", func(t *testing.T) {
+		s := NewMemStore()
+		_, drec, _, _, _ := divergenceChain(t, s)
+		// Same parameter identities and display names as the warped
+		// declaring function, but a different body: a valid function/1
+		// that never declared the recorded mapping.
+		px, py, pz := DeriveParameterID(0), DeriveParameterID(1), DeriveParameterID(2)
+		altBody := mustStoreExpr(t, s, NewBoundSymbol("y", py))
+		altFn := Function{ParameterIDs: []ParameterID{px, py, pz},
+			ParamNames: []string{"x", "y", "z"}, BodyRef: altBody}
+		altBytes, err := altFn.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		altRef, err := s.Put(FamilyFunction, altBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DeclaringFnRef = altRef })
+		bothFail(t, s, bad, "declaring function differs")
+	})
+
+	t.Run("substituted-covariant-derivative", func(t *testing.T) {
+		s := NewMemStore()
+		_, drec, _, crecRef, _ := divergenceChain(t, s)
+		rec := divergenceRecord(t, s, drec)
+		crec := riemannContractionRecord(t, s, crecRef)
+		// Covariant derivative of the contraction (Ricci) field through
+		// the same connection and binding: valid rank-3 evidence over the
+		// same chart, but different content from the recorded G-field
+		// derivative.
+		altField, _, err := EvaluateCovariantDerivative(s, crec.ResultRef, rec.ConnectionRef, rec.Mapping, rec.DeclaringFnRef, rec.ConditionRefs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if altField == rec.CovariantResultRef {
+			t.Fatal("alternate derivative coincides with recorded evidence: substitution vacuous")
+		}
+		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.CovariantResultRef = altField })
+		bothFail(t, s, bad, "covariant evidence does not match recomputation")
+	})
+
+	t.Run("reordered-result-components", func(t *testing.T) {
+		s := NewMemStore()
+		_, drec, _, _, _ := divergenceChain(t, s)
+		rec := divergenceRecord(t, s, drec)
+		_, fpayload, err := s.Lookup(rec.ResultRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rf, err := DecodeTensorField(fpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, tpayload, err := s.Lookup(rf.TensorRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rt, err := DecodeTensor(tpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Swap D_x (factored nonzero form) with D_y (literal zero): the
+		// ordered comparison must catch the positional mismatch.
+		swapped := append([]artifact.ArtifactRef{}, rt.ComponentRefs...)
+		swapped[0], swapped[1] = swapped[1], swapped[0]
+		newTensor, err := s.Put(FamilyTensor, Tensor{Rank: rt.Rank, Dimension: rt.Dimension, IndexRefs: rt.IndexRefs, ComponentRefs: swapped}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		newField, err := s.Put(FamilyTensorField, TensorField{TensorRef: newTensor, CoordinateSystemRef: rf.CoordinateSystemRef}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.ResultRef = newField })
+		bothFail(t, s, bad, "result component 0 mismatch")
+	})
+
+	t.Run("tampered-derivation-premises", func(t *testing.T) {
+		s := NewMemStore()
+		_, drec, _, _, _ := divergenceChain(t, s)
+		rec := divergenceRecord(t, s, drec)
+		_, dpayload, err := s.Lookup(rec.DerivationRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := DecodeDerivation(dpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Dropped premise.
+		dropped := Derivation{PremiseRefs: append([]artifact.ArtifactRef{}, d.PremiseRefs[1:]...), Steps: d.Steps, ResultRefs: d.ResultRefs}
+		dropBytes, err := dropped.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		altDrop, err := s.Put(FamilyDerivation, dropBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		badDrop := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DerivationRef = altDrop })
+		bothFail(t, s, badDrop, "premises do not match recomputation")
+		// Added premise: a fresh expression resolves and is a permitted
+		// premise family, so only the linkage gate can reject it.
+		extraRef := mustStoreExpr(t, s, MustRational(13, 1))
+		added := Derivation{PremiseRefs: append(append([]artifact.ArtifactRef{}, d.PremiseRefs...), extraRef), Steps: d.Steps, ResultRefs: d.ResultRefs}
+		addBytes, err := added.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		altAdd, err := s.Put(FamilyDerivation, addBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		badAdd := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DerivationRef = altAdd })
+		bothFail(t, s, badAdd, "premises do not match recomputation")
+	})
+
+	t.Run("permuted-derivation-steps", func(t *testing.T) {
+		s := NewMemStore()
+		_, drec, _, _, _ := divergenceChain(t, s)
+		rec := divergenceRecord(t, s, drec)
+		_, dpayload, err := s.Lookup(rec.DerivationRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := DecodeDerivation(dpayload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(d.Steps) < 2 {
+			t.Fatal("derivation too short to permute")
+		}
+		// Swap the final CANON/SIMPLIFY pair: a SIMPLIFY step lands in
+		// the CANON slot of the last assembly pair.
+		swapLast := append([]DerivationStep{}, d.Steps...)
+		swapLast[len(swapLast)-2], swapLast[len(swapLast)-1] = swapLast[len(swapLast)-1], swapLast[len(swapLast)-2]
+		lastBytes, err := Derivation{PremiseRefs: d.PremiseRefs, Steps: swapLast, ResultRefs: d.ResultRefs}.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		altLast, err := s.Put(FamilyDerivation, lastBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		badLast := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DerivationRef = altLast })
+		bothFail(t, s, badLast, "must be CANON")
+		// Swap two CANON steps from different assembly pairs: rule slots
+		// stay CANON but the premise linkage breaks.
+		if len(d.Steps) < 6 {
+			t.Fatal("derivation too short for cross-pair swap")
+		}
+		n := len(d.Steps)
+		swapCross := append([]DerivationStep{}, d.Steps...)
+		swapCross[n-6], swapCross[n-4] = swapCross[n-4], swapCross[n-6]
+		crossBytes, err := Derivation{PremiseRefs: d.PremiseRefs, Steps: swapCross, ResultRefs: d.ResultRefs}.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		altCross, err := s.Put(FamilyDerivation, crossBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		badCross := tamperDivergenceRecord(t, s, drec, func(r *RiemannTraceReverseDivergenceEvaluation) { r.DerivationRef = altCross })
+		bothFail(t, s, badCross, "premise mismatch")
 	})
 }
 
