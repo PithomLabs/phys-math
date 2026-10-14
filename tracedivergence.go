@@ -715,17 +715,11 @@ func resolveAndValidateDivergence(store Store, ref artifact.ArtifactRef) (Rieman
 	// Recompute the covariant derivative idempotently: identical inputs
 	// reproduce identical references, so recomputation verifies rather
 	// than repairs. The recomputed field must equal the recorded evidence.
-	_, tfPayload, err := store.Lookup(trec.ResultRef)
-	if err != nil {
-		return fail(fmt.Errorf("physmath: divergence trace-reverse result unresolvable: %w", err))
-	}
-	_ = tfPayload
+	// (The recomputation resolves the trace-reverse result itself and
+	// fails closed when unresolvable, so no separate lookup is needed.)
 	reCovField, reCovDeriv, err := EvaluateCovariantDerivative(store, trec.ResultRef, rec.ConnectionRef, rec.Mapping, rec.DeclaringFnRef, rec.ConditionRefs)
 	if err != nil {
 		return fail(fmt.Errorf("physmath: divergence covariant recomputation failed: %w", err))
-	}
-	if reCovField != rec.CovariantResultRef {
-		return fail(fmt.Errorf("physmath: divergence covariant evidence does not match recomputation"))
 	}
 	if reCovField != rec.CovariantResultRef {
 		return fail(fmt.Errorf("physmath: divergence covariant evidence does not match recomputation"))
